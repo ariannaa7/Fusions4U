@@ -1,0 +1,612 @@
+---
+title: "Preliminary analysis of fusion transcript predictions"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Combines all Arriba and STAR-Fusion calls for each cell line in one large dataframe. Filter the calls based on relevance."
+version: "1.0.0"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load image from previous script
+
+```{r}
+load("~/fusions/Scripts/01_IdentifyCellLines_scripts/identifyCellLines.RData")
+```
+
+## Load packages
+
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(rtracklayer, quietly = TRUE, warn.conflicts = FALSE)) # v1.62.0, "import" function for gtf
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0 (readr (v2.1.5), dplyr (v1.1.4), tidyr (v1.3.1), purr (v1.0.2), stringr (v1.5.1), ggplot2 (v3.5.1))
+
+suppressPackageStartupMessages(library(data.table, quietly = TRUE, warn.conflicts = FALSE)) # v1.17.8
+```
+
+## Load files & set helpful variable that could recur
+
+### Load in genome annotation file (gencode gtf v44)
+
+```{r}
+gencode_v44 <-import("~/fusions/Data/ReferenceGenome/gencode.v44.annotation.gtf") %>%
+  as.data.frame(.) # convert from large genomic ranges type to df
+
+gencode_v44_genes <- gencode_v44 %>%
+  filter(type == "gene") # 62700 genes
+```
+
+### Load cell line summary tsv
+
+```{r}
+cellLine_summary <- cellLine_summary # recall, this was created already in identifyCellLines
+
+# Subset cellLine_summary
+id_tiss_acc_size <- cellLine_summary %>%
+  select(
+    sampleID,
+    tissueType,
+    rna_run_accession,
+    rna_size_MB,
+    wgs_run_accession,
+    wgs_size_MB
+  )
+```
+
+### Set paths
+
+```{r}
+# Paths to the fusion tsvs
+fusionTranscriptsDir <- "~/fusions/05_PreliminaryAnalysis/fusionTranscripts"
+
+tsv_paths <-
+  list.files(
+    fusionTranscriptsDir,
+    recursive = TRUE,
+    full.names = TRUE,
+    pattern = "\\.tsv$"
+  )
+```
+
+# Create a large dataframe with every predicted fusion
+
+## Data frame that stores information about each TSV
+
+```{r}
+# df with path, RNA run accession, program used to generate it
+tsv_info <- tibble(
+  path = tsv_paths,
+  rna_run_accession = str_extract(tsv_paths, "(?<=/)[^/]+(?=/[^/]+$)"), # regex to pull the RNA-Seq run accession from the directory name in the path
+
+  program = case_when(
+    # set program to:
+    str_detect(tsv_paths, "arriba_") ~ "arriba", # arriba when the path includes "arriba_", protein domain annotations from Arriba provided Pfam annotations
+    str_detect(tsv_paths, "arribaUCSCproteinDomains1based") ~ "arriba_UCSCpfam", # identical Arriba predictions except retained protein domain annotations come from UCSC data integrator Pfam
+    str_detect(tsv_paths, "star-fusion") ~ "star-fusion" # star-fusion when the path includes "star-fusion"
+  )
+)
+
+# Bind with the summary we already made (RNA-Seq/WGS run accession, program, number of transcripts, sample ID, tissue type, size MB)
+tsv_info <- tsv_info %>%
+  left_join(id_tiss_acc_size, by = c("rna_run_accession"))
+```
+
+## Create and run function to load all the fusion data into one df
+
+```{r}
+load_and_annotate_tsv <-
+  function(file_path,
+           run_accession_rna,
+           run_accession_wgs,
+           program_name,
+           ID,
+           tissue_type) {
+    dat <-
+      read_tsv(file_path, show_col_types = FALSE) # read in tsv file with fusions. show_col_types = FALSE to silence stdout
+
+    # Annotate with the metadata
+    dat <- dat %>%
+      mutate(
+        rna_run_accession = run_accession_rna,
+        wgs_run_accession = run_accession_wgs,
+        program = program_name,
+        sampleID = ID,
+        tissueType = tissue_type # don't need rna_size_MB & numberOfTranscripts since each fusion will be one entry in the df and this info is regarding the whole cell line
+      )
+
+    return(dat)
+  }
+
+all_fusion_data <- tsv_info %>%
+  # Add a col named "data" to tsv_info, the column is a list composed of data frames for each TSV
+  mutate(data = pmap(
+    list(
+      path,
+      rna_run_accession,
+      wgs_run_accession,
+      program,
+      sampleID,
+      tissueType
+    ),
+    load_and_annotate_tsv
+  )) %>% # when each tsv is loaded, we are adding the the associated RNA-Seq run acc, WGS run acc, program, etc. as specified in the function
+  pull(data) %>% # pull just the data column
+  bind_rows() %>% # combine all the data frames into one
+  relocate(rna_run_accession,
+    wgs_run_accession,
+    program,
+    sampleID,
+    tissueType,
+    .before = `#gene1`
+  ) %>% # move the descriptive columns to the start of the data frame
+  dplyr::rename(
+    gene1 = "#gene1", # rename the first column in the Arriba output
+    FusionName = "#FusionName"
+  ) # rename the first column in the STAR-Fusion output
+```
+
+# Subset the fusion data by program and prepare for renaming!
+
+```{r}
+colnames_original_arriba <-
+  c(
+    "gene1",
+    "gene2",
+    "strand1(gene/fusion)",
+    "strand2(gene/fusion)",
+    "breakpoint1",
+    "breakpoint2",
+    "site1",
+    "site2",
+    "type",
+    "split_reads1",
+    "split_reads2",
+    "discordant_mates",
+    "coverage1",
+    "coverage2",
+    "confidence",
+    "reading_frame",
+    "tags",
+    "retained_protein_domains",
+    "closest_genomic_breakpoint1",
+    "closest_genomic_breakpoint2",
+    "gene_id1",
+    "gene_id2",
+    "transcript_id1",
+    "transcript_id2",
+    "direction1",
+    "direction2",
+    "filters",
+    "fusion_transcript",
+    "peptide_sequence",
+    "read_identifiers"
+  ) # fine not to have retained_protein_domains_Pfam_ucsc here! It isn't called that in the sf df
+
+colnames_original_sf <-
+  c(
+    "FusionName",
+    "JunctionReadCount",
+    "SpanningFragCount",
+    "est_J",
+    "est_S",
+    "SpliceType",
+    "LeftGene",
+    "LeftBreakpoint",
+    "RightGene",
+    "RightBreakpoint",
+    "LargeAnchorSupport",
+    "FFPM",
+    "LeftBreakDinuc",
+    "LeftBreakEntropy",
+    "RightBreakDinuc",
+    "RightBreakEntropy",
+    "annots",
+    "CDS_LEFT_ID",
+    "CDS_LEFT_RANGE",
+    "CDS_RIGHT_ID",
+    "CDS_RIGHT_RANGE",
+    "PROT_FUSION_TYPE",
+    "FUSION_MODEL",
+    "FUSION_CDS",
+    "FUSION_TRANSL",
+    "PFAM_LEFT",
+    "PFAM_RIGHT"
+  )
+
+all_fusion_data_arribaUCSCpfam <- all_fusion_data %>%
+  filter(program == "arriba_UCSCpfam") %>% # Arriba = 39,556
+  dplyr::rename(retained_protein_domains_Pfam_ucsc = "retained_protein_domains") %>%
+  mutate(program = "arriba") # update this for matching in next step
+
+all_fusion_data_arriba <- all_fusion_data %>%
+  filter(program == "arriba") %>% # 39556 rows, 62 cols
+  left_join(all_fusion_data_arribaUCSCpfam) %>% # 39556 rows, 63 cols
+  select(-all_of(colnames_original_sf)) # 39556 rows, 36 cols
+
+all_fusion_data_sf <- all_fusion_data %>%
+  filter(program == "star-fusion") %>% # 6123 rows, 62 cols
+  select(-all_of(colnames_original_arriba)) # 6123 rows, 32 cols
+```
+
+# Rename columns and split some columns into new ones
+
+```{r}
+all_fusion_data_arriba_updated <- all_fusion_data_arriba %>%
+  separate(
+    `strand1(gene/fusion)`,
+    c("fiveprime_gene_strand", "fiveprime_transcribed_strand"),
+    sep = "/"
+  ) %>%
+  separate(
+    `strand2(gene/fusion)`,
+    c("threeprime_gene_strand", "threeprime_transcribed_strand"),
+    sep = "/"
+  ) %>%
+  separate(breakpoint1,
+    c("hg38_fiveprime_chr", "hg38_fiveprime_fusion_junction"),
+    sep = ":"
+  ) %>%
+  separate(breakpoint2,
+    c("hg38_threeprime_chr", "hg38_threeprime_fusion_junction"),
+    sep = ":"
+  ) %>%
+  select(-closest_genomic_breakpoint1, -closest_genomic_breakpoint2) %>% # we didn't provide Arriba with WGS data! Will not have any "closest genomic breakpoint" entries
+  mutate(
+    fusion_name = paste(gene1, gene2, sep = "::"), # create a fusion name column for the fusion pair based on the gene symbols/names
+    geneID_fusionName = paste(gene_id1, gene_id2, sep = "::"), # create a fusion name column for the fusion pair based on the gene IDs
+  ) %>%
+  dplyr::rename(
+    fiveprime_gene_name = "gene1",
+    threeprime_gene_name = "gene2",
+    fiveprime_junctionSite_arriba = "site1",
+    threeprime_junctionSite_arriba = "site2",
+    fusionType_arriba = "type",
+    fiveprime_split_reads_arriba = "split_reads1",
+    threeprime_split_reads_arriba = "split_reads2",
+    discordant_mates_arriba = "discordant_mates",
+    fiveprime_coverage_arriba = "coverage1",
+    threeprime_coverage_arriba = "coverage2",
+    confidence_arriba = "confidence",
+    reading_frame_arriba = "reading_frame",
+    tags_arriba = "tags",
+    retained_protein_domains_PfamArriba_arriba = "retained_protein_domains",
+    retained_protein_domains_PfamUCSC_arriba = "retained_protein_domains_Pfam_ucsc",
+    fiveprime_geneID = "gene_id1",
+    threeprime_geneID = "gene_id2",
+    fiveprime_transcript_id_arriba = "transcript_id1", # best matching isoform that is transcribed
+    threeprime_transcript_id_arriba = "transcript_id2", # best matching isoform that is transcribed
+    fiveprime_direction_arriba = "direction1", # per Arriba, good if transcribed strand prediction fails
+    threeprime_direction_arriba = "direction2",
+    filters_arriba = "filters",
+    fusion_transcript_arriba = "fusion_transcript",
+    peptide_sequence_arriba = "peptide_sequence", # predicted by Arriba
+    read_identifiers_arriba = "read_identifiers"
+  ) %>%
+  mutate(reading_frame_arriba = case_when(
+    (reading_frame_arriba == ".") ~ "unknown",
+    TRUE ~ reading_frame_arriba # keep existing if not a "."
+  )) %>%
+  mutate(
+    tags_arriba = if_else(tags_arriba == ".", "none", tags_arriba),
+    retained_protein_domains_PfamArriba_arriba = if_else(
+      retained_protein_domains_PfamArriba_arriba == ".",
+      "none",
+      retained_protein_domains_PfamArriba_arriba
+    ),
+    retained_protein_domains_PfamUCSC_arriba = if_else(
+      retained_protein_domains_PfamUCSC_arriba == ".",
+      "none",
+      retained_protein_domains_PfamUCSC_arriba
+    ),
+    filters_arriba = if_else(filters_arriba == ".", "none", filters_arriba),
+    fiveprime_transcript_id_arriba = if_else(
+      fiveprime_transcript_id_arriba == ".",
+      "unknown",
+      fiveprime_transcript_id_arriba
+    ),
+    threeprime_transcript_id_arriba = if_else(
+      threeprime_transcript_id_arriba == ".",
+      "unknown",
+      threeprime_transcript_id_arriba
+    ),
+    peptide_sequence_arriba = if_else(
+      peptide_sequence_arriba == ".",
+      "unknown",
+      peptide_sequence_arriba
+    )
+  )
+
+all_fusion_data_sf_updated <- all_fusion_data_sf %>%
+  mutate(
+    fiveprime_gene_name = sub("\\^.*", "", LeftGene), # isolate the STAR-Fusion left (5') Gene IDs, name before the ^
+    threeprime_gene_name = sub("\\^.*", "", RightGene), # isolate the STAR-Fusion right (3') Gene IDs, name before the ^
+    fiveprime_geneID = sub(".*\\^", "", LeftGene), # isolate the STAR-Fusion left (5') Gene IDs, id after the ^
+    threeprime_geneID = sub(".*\\^", "", RightGene), # isolate the STAR-Fusion right (3') Gene IDs, id after the ^
+  ) %>%
+  mutate(
+    fusion_name = paste(fiveprime_gene_name, threeprime_gene_name, sep = "::"), # create a fusion name column for the fusion pair based on the gene symbols/names
+    geneID_fusionName = paste(fiveprime_geneID, threeprime_geneID, sep = "::"), # create a fusion name column for the fusion pair based on the gene IDs
+  ) %>%
+  select(-FusionName, -LeftGene, -RightGene) %>% # drop the original sf columns now that we formatted new versions above
+  separate(
+    LeftBreakpoint,
+    c(
+      "hg38_fiveprime_chr",
+      "hg38_fiveprime_fusion_junction",
+      "fiveprime_transcribed_strand"
+    ),
+    sep = ":"
+  ) %>%
+  mutate(fiveprime_gene_strand = fiveprime_transcribed_strand) %>% # STAR-Fusion only outputs sense transcription predictions! Plus sanity checked it
+  separate(
+    RightBreakpoint,
+    c(
+      "hg38_threeprime_chr",
+      "hg38_threeprime_fusion_junction",
+      "threeprime_transcribed_strand"
+    ),
+    sep = ":"
+  ) %>%
+  mutate(threeprime_gene_strand = threeprime_transcribed_strand) %>% # again, STAR-Fusion only outputs sense transcription predictions! Plus sanity checked it
+  dplyr::rename(
+    junctionReadCount_sf = "JunctionReadCount",
+    spanningFragCount_sf = "SpanningFragCount",
+    est_J_sf = "est_J",
+    est_S_sf = "est_S",
+    spliceType_sf = "SpliceType",
+    largeAnchorSupport_sf = "LargeAnchorSupport",
+    ffpm_sf = "FFPM", # fusion fragments per million reads
+    fiveprime_BreakDinuc_sf = "LeftBreakDinuc", # dinucleotide seqs surrounding fusion junction
+    fiveprime_BreakEntropy_sf = "LeftBreakEntropy", # Shannon entropy of bases flanking fusion junction
+    threeprime_BreakDinuc_sf = "RightBreakDinuc",
+    threeprime_BreakEntropy_sf = "RightBreakEntropy",
+    annots_sf = "annots",
+    fiveprime_cds_ID_sf = "CDS_LEFT_ID",
+    fiveprime_cds_range_sf = "CDS_LEFT_RANGE",
+    threeprime_cds_ID_sf = "CDS_RIGHT_ID",
+    threeprime_cds_range_sf = "CDS_RIGHT_RANGE",
+    reading_frame_sf = "PROT_FUSION_TYPE",
+    fusion_model_sf = "FUSION_MODEL", # predicted structure of the fusion
+    fusion_cds_sf = "FUSION_CDS",
+    fusion_transl_sf = "FUSION_TRANSL",
+    fiveprime_pfam_sf = "PFAM_LEFT",
+    threeprime_pfam_sf = "PFAM_RIGHT"
+  ) %>%
+  mutate(reading_frame_sf = case_when(
+    (reading_frame_sf == "FRAMESHIFT") ~ "out-of-frame",
+    (reading_frame_sf == "INFRAME") ~ "in-frame",
+    (reading_frame_sf == ".") ~ "unknown"
+  )) %>%
+  mutate(
+    annots_sf = if_else(annots_sf == ".", "none", annots_sf),
+    fiveprime_cds_ID_sf = if_else(fiveprime_cds_ID_sf == ".", "unknown", fiveprime_cds_ID_sf), # sf selects candidate fusion isoform
+    fiveprime_cds_range_sf = if_else(
+      fiveprime_cds_range_sf == ".",
+      "unknown",
+      fiveprime_cds_range_sf
+    ),
+    threeprime_cds_ID_sf = if_else(threeprime_cds_ID_sf == ".", "unknown", threeprime_cds_ID_sf), # sf selects candidate fusion isoform
+    threeprime_cds_range_sf = if_else(
+      threeprime_cds_range_sf == ".",
+      "unknown",
+      threeprime_cds_range_sf
+    ),
+    fusion_model_sf = if_else(fusion_model_sf == ".", "unknown", fusion_model_sf), # not predicted
+    fusion_cds_sf = if_else(fusion_cds_sf == ".", "unknown", fusion_cds_sf),
+    fusion_transl_sf = if_else(fusion_transl_sf == ".", "unknown", fusion_transl_sf),
+    fiveprime_pfam_sf = if_else(fiveprime_pfam_sf == ".", "none", fiveprime_pfam_sf),
+    threeprime_pfam_sf = if_else(threeprime_pfam_sf == ".", "none", threeprime_pfam_sf)
+  )
+
+
+all_fusion_data_updated <- all_fusion_data_arriba_updated %>%
+  bind_rows(all_fusion_data_sf_updated) %>% # 45679 rows (Arriba = 39556, STAR-Fusion = 6123)
+  left_join(
+    gencode_v44_genes %>% select(seqnames, start, end, strand, gene_id, gene_type, gene_name),
+    by = c(
+      "hg38_fiveprime_chr" = "seqnames",
+      "fiveprime_geneID" = "gene_id"
+    )
+  ) %>%
+  dplyr::rename(
+    hg38_fiveprime_gene_gtfStart = "start",
+    hg38_fiveprime_gene_gtfEnd = "end",
+    fiveprime_gene_type = "gene_type",
+    fiveprime_gtf_strand = "strand",
+    fiveprime_gtf_gene_name = "gene_name"
+  ) %>%
+  left_join(
+    gencode_v44_genes %>% select(seqnames, start, end, strand, gene_id, gene_type, gene_name),
+    by = c(
+      "hg38_threeprime_chr" = "seqnames",
+      "threeprime_geneID" = "gene_id"
+    )
+  ) %>%
+  dplyr::rename(
+    hg38_threeprime_gene_gtfStart = "start",
+    hg38_threeprime_gene_gtfEnd = "end",
+    threeprime_gene_type = "gene_type",
+    threeprime_gtf_strand = "strand",
+    threeprime_gtf_gene_name = "gene_name"
+  ) %>%
+  # Update so they are numeric like all other coordinates!
+  mutate(across(
+    c(
+      hg38_fiveprime_fusion_junction,
+      hg38_threeprime_fusion_junction
+    ),
+    as.numeric
+  ))
+```
+
+- Prior to filtering
+  - *Arriba* = 39556 fusion transcript predictions
+  - *STAR-Fusion* = 6123 fusion transcript predictions
+  
+# Filter the fusion data
+
+```{r}
+# Filter out fusions with fusion junctions in intergenic regions
+
+all_fusion_data_filtered <-
+  all_fusion_data_updated %>% # 45679 rows before filtering
+
+  # If the program is Arriba, exclude sites where the junction is in marked to be in an intergenic region
+  filter(
+    !(
+      fiveprime_junctionSite_arriba == "intergenic" |
+        threeprime_junctionSite_arriba == "intergenic"
+    ) |
+      program != "arriba"
+  ) %>% # Removes 9400 rows 36729 rows left (Arriba = 30606, STAR-Fusion = 6123)
+
+  # If the program is Arriba and the 5' or 3' partner's strand that was transcribed could not be predicted, then remove! We need to know sense. The "." in gene strand were filtered out when we filtered out intergenic junctions for Arriba
+  filter(fiveprime_transcribed_strand != "." &
+    fiveprime_transcribed_strand != ".") %>% # Removes 1246 rows 35483 rows left (Arriba = 29360, STAR-Fusion = 6123)
+
+  # If the program is STAR-Fusion, exclude IG superlocus fusions! @ indicates superlocus, STAR-Fusion GRCh38.v44 gencode gtf includes these superlocus sites (critical in leukemia but not much else) and can't find matches in our regular GRCh38.v44 gencode gtf. The geneIDs are formatted differently and can't find them even in the star-fusion gencode gtf so we have nothing to map to in the standard gencode gtf
+  filter(!str_detect(fusion_name, "@")) %>% # Removes 27 rows 35456 rows left (Arriba = 29360, STAR-Fusion = 6096)
+
+  filter(
+    fiveprime_gene_strand == fiveprime_gtf_strand &
+      threeprime_gene_strand == threeprime_gtf_strand
+  ) %>% # Still 35456 rows, passed sanity check! Supports STAR-Fusion paper which says only sense predictions are kept!
+
+  mutate(fiveprime_transcriptionType = case_when(
+    (fiveprime_gene_strand == fiveprime_transcribed_strand) ~ "sense",
+    (fiveprime_gene_strand != fiveprime_transcribed_strand) ~ "antisense"
+  )) %>%
+  mutate(threeprime_transcriptionType = case_when(
+    (threeprime_gene_strand == threeprime_transcribed_strand) ~ "sense",
+    (threeprime_gene_strand != threeprime_transcribed_strand) ~ "antisense"
+  )) %>%
+  # 5560 instances of antisense transcription (Arriba only!)
+
+  filter(
+    fiveprime_gene_name == fiveprime_gtf_gene_name &
+      threeprime_gene_name == threeprime_gtf_gene_name
+  ) %>% # Still 35456 rows, passed sanity check! No discrepancies in gene name with left join based on ID
+
+  select(
+    -fiveprime_gtf_strand,
+    -threeprime_gtf_strand,
+    -fiveprime_gtf_gene_name,
+    -threeprime_gtf_gene_name
+  ) %>% # get rid of these columns now that sanity check passed
+
+  filter((
+    hg38_fiveprime_gene_gtfStart <= hg38_fiveprime_fusion_junction &
+      hg38_fiveprime_fusion_junction <= hg38_fiveprime_gene_gtfEnd
+  ) &
+    (
+      hg38_threeprime_gene_gtfStart <= hg38_threeprime_fusion_junction &
+        hg38_threeprime_fusion_junction <= hg38_threeprime_gene_gtfEnd
+    )) %>% # 35225 rows (Arriba = 29360, STAR-Fusion = 5865) 231 STAR-Fusion predictions failed sanity check! Junction was in intergenic region! No Arriba filtered out because we already filtered out when we removed the ones flagged "intergenic"
+
+  filter(fiveprime_geneID != threeprime_geneID) %>% # filter out the 1370 inragenic Arriba predictions! Now 33855 rows total
+
+   # Use select to relocate columns! 70 columns
+  select(
+    fusion_name,
+    geneID_fusionName,
+    rna_run_accession,
+    wgs_run_accession,
+    sampleID,
+    tissueType,
+    program,
+    fiveprime_gene_name,
+    fiveprime_geneID,
+    fiveprime_gene_type,
+    hg38_fiveprime_chr,
+    fiveprime_gene_strand,
+    fiveprime_transcribed_strand,
+    hg38_fiveprime_gene_gtfStart,
+    hg38_fiveprime_fusion_junction,
+    hg38_fiveprime_gene_gtfEnd,
+    threeprime_gene_name,
+    threeprime_geneID,
+    threeprime_gene_type,
+    hg38_threeprime_chr,
+    threeprime_gene_strand,
+    threeprime_transcribed_strand,
+    hg38_threeprime_gene_gtfStart,
+    hg38_threeprime_fusion_junction,
+    hg38_threeprime_gene_gtfEnd,
+    fiveprime_transcriptionType,
+    threeprime_transcriptionType,
+    reading_frame_arriba,
+    fiveprime_junctionSite_arriba,
+    threeprime_junctionSite_arriba,
+    fusionType_arriba,
+    confidence_arriba,
+    tags_arriba,
+    retained_protein_domains_PfamArriba_arriba,
+    retained_protein_domains_PfamUCSC_arriba,
+    fiveprime_split_reads_arriba,
+    threeprime_split_reads_arriba,
+    discordant_mates_arriba,
+    fiveprime_coverage_arriba,
+    threeprime_coverage_arriba,
+    fiveprime_transcript_id_arriba,
+    threeprime_transcript_id_arriba,
+    fiveprime_direction_arriba,
+    threeprime_direction_arriba,
+    filters_arriba,
+    fusion_transcript_arriba,
+    peptide_sequence_arriba,
+    read_identifiers_arriba,
+    reading_frame_sf,
+    fiveprime_pfam_sf,
+    threeprime_pfam_sf,
+    annots_sf,
+    junctionReadCount_sf,
+    spanningFragCount_sf,
+    est_J_sf,
+    est_S_sf,
+    spliceType_sf,
+    largeAnchorSupport_sf,
+    ffpm_sf,
+    fiveprime_BreakDinuc_sf,
+    fiveprime_BreakEntropy_sf,
+    threeprime_BreakDinuc_sf,
+    threeprime_BreakEntropy_sf,
+    fiveprime_cds_ID_sf,
+    fiveprime_cds_range_sf,
+    threeprime_cds_ID_sf,
+    threeprime_cds_range_sf,
+    fusion_model_sf,
+    fusion_cds_sf,
+    fusion_transl_sf
+  ) %>% # Still 70 columns
+
+  mutate(fusion_id = row_number()) %>% # add an ID column to easily identify each fusion. Now 71 columns!
+
+  relocate(fusion_id, .before = fusion_name)
+```
+
+- After filtering
+  - *Arriba* = 27,990 fusion transcript predictions
+  - *STAR-Fusion* = 5,865 fusion transcript predictions
+  
+# Subset the filtered fusion data by program
+
+```{r}
+arriba_filtered_fusion_data <- all_fusion_data_filtered %>%
+  filter(program == "arriba") # 27990 rows
+
+sf_filtered_fusion_data <- all_fusion_data_filtered %>%
+  filter(program == "star-fusion") # 5865 rows
+```
+
+
+# Save workspace
+
+```{r}
+# save.image("preAnalysis.RData")
+```
