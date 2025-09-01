@@ -1,0 +1,375 @@
+---
+title: "Identify cell lines with matched RNA-Seq data and WGS data"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Create a large summary df with metadata for each cell line with matched RNA-Seq and WGS data"
+version: "1.0.0"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load packages
+
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0 (readr (v2.1.5), dplyr (v1.1.4), tidyr (v1.3.1), purr (v1.0.2), stringr (v1.5.1), ggplot2 (v3.5.1))
+```
+
+## Load metadata, RNA-Seq, and WGS summary files
+
+```{r}
+cellLine_metadata_df <- read.csv("~/fusions/01_IdentifyCellLines/sra_metadata.csv", header = TRUE, sep = ",")
+
+rnaseq_metadata_df <- read.csv("~/fusions/01_IdentifyCellLines/rnaseq_RunInfo.csv", header = TRUE, sep = ",")
+
+wgs_metadata_df <- read.csv("~/fusions/01_IdentifyCellLines/wgs_RunInfo.csv", header = TRUE, sep = ",")
+# https://www.ncbi.nlm.nih.gov/Traces/study/?acc=SRP186687&o=assay_type_s%3Ad%253Bacc_s%253Bacc_s%253Bacc_s%253Bacc_s%253Bacc_s%253Bacc_s%253Bacc_s%253Bacc_s%3Bacc_s%3Aa
+```
+
+# Reformat the dataframes
+
+## Reformat cell line metadata
+
+```{r}
+cellLine_metadata <- cellLine_metadata_df %>%
+  filter(`Assay.Type` == "RNA-Seq" |
+    `Assay.Type` == "WGS") %>% # isolate RNA-Seq and WGS rows, drops to 1348 rows
+  group_by(`Sample.Name`) %>% # group by sample name
+  filter(n() > 1) %>% # pull sample names that appear more than once (meaning matched RNA-Seq and WGS), drops to 656 rows
+  ungroup() %>%
+  # Omit these unnecessary/redundant columns
+  select(
+    -c(
+      AssemblyName,
+      BioProject,
+      BioSampleModel,
+      Bytes,
+      `Center.Name`,
+      Consent,
+      contains("DATASTORE"),
+      Instrument,
+      isolate,
+      contains("Library"),
+      Organism,
+      Platform,
+      ReleaseDate,
+      sample_type
+    )
+  ) %>%
+  # Separate into sampleID and tissueType
+  separate(
+    `Sample.Name`,
+    into = c("sampleID", "tissueType"),
+    sep = "_",
+    extra = "merge"
+  ) %>%
+  rename(biomaterial_provider = "BIOMATERIAL_PROVIDER") # identical between RNA-Seq and WGS! 305 identical providers, 23 where both are NA
+```
+
+## Pull a character vector of the 328 cell lines with matched RNA-Seq and WGS data
+
+```{r}
+matched_cellLines <- pull(cellLine_metadata, sampleID) %>%
+  unique() # 328 cell lines with matched RNA-Seq and WGS data!
+```
+
+## Reformat the RNA-Seq df
+
+```{r}
+rnaseq_metadata <- rnaseq_metadata_df %>%
+  select(-c(AssemblyName, download_path, LibraryName)) %>% # Assembly name = GCA_000001405.13
+  select(-c(
+    LibraryStrategy, # RNA-Seq,
+    LibrarySelection, # cDNA
+    LibrarySource, # TRANSCRIPTOMIC
+    LibraryLayout # PAIRED
+  )) %>%
+  select(-c(InsertSize, InsertDev, Platform, Model, BioProject)) %>% # 0, 0, ILLUMINA, Illumina HiSeq 2500, PRJNA523380
+  select(-c(Study_Pubmed_id, ProjectID, SampleType, TaxID, ScientificName)) %>% # 2, 523380, simple, 9606, Homo sapiens
+  select(-c(CenterName, Consent)) %>% # BROAD INSTITUTE, public
+  select(
+    -c( # NA cols
+      g1k_pop_code,
+      source,
+      g1k_analysis_group,
+      Subject_ID,
+      Disease,
+      Tumor,
+      Affection_Status,
+      Analyte_Type,
+      Histological_Type,
+      Body_Site,
+      dbgap_study_accession
+    )
+  ) %>%
+  rename(
+    rna_run_accession = "Run",
+    rna_release_date = "ReleaseDate",
+    rna_load_date = "LoadDate",
+    rna_spots = "spots",
+    rna_bases = "bases", # identical to rna_bases in cellLine_summary
+    rna_spots_with_mates = "spots_with_mates",
+    rna_avgLength = "avgLength",
+    rna_size_MB = "size_MB",
+    rna_exp_accession = "Experiment",
+    study_accession = "SRAStudy",
+    rna_sample_accession = "Sample",
+    sex = "Sex",
+    bio_sample = "BioSample",
+    rna_submission_accession = "Submission",
+    rna_run_hash = "RunHash",
+    rna_read_hash = "ReadHash"
+  ) %>%
+  # Separate into sampleID and tissueType
+  separate(
+    SampleName,
+    into = c("sampleID", "tissueType"),
+    sep = "_",
+    extra = "merge"
+  ) %>%
+  mutate(rna_spots_with_mates = ifelse(sampleID == "A375", 76739546, rna_spots_with_mates)) %>% # typo in df, manually checked the file and 76739546 is correct
+  filter(sampleID %in% matched_cellLines) %>% # drops to 328 as expected
+
+  # Match the metadata
+  left_join(
+    cellLine_metadata %>% filter(`Assay.Type` == "RNA-Seq") %>% select(-`Assay.Type`),
+    by = c(
+      "rna_run_accession" = "Run",
+      "rna_bases" = "Bases",
+      "rna_avgLength" = "AvgSpotLen",
+      "rna_exp_accession" = "Experiment",
+      "study_accession" = "SRA.Study",
+      "bio_sample" = "BioSample",
+      "sampleID",
+      "tissueType",
+      "sex"
+    )
+  ) %>%
+  rename(
+    rna_create_date = "create_date",
+    rna_version = "version"
+  )
+```
+
+## Reformat the WGS df
+
+```{r}
+wgs_metadata <- wgs_metadata_df %>%
+  select(-c(AssemblyName, download_path, LibraryName)) %>% # Assembly name = GCA_000001405.13
+  select(-c(
+    LibraryStrategy, # WGS
+    LibrarySelection, # size fractionation
+    LibrarySource, # GENOMIC
+    LibraryLayout # PAIRED
+  )) %>%
+  select(-c(InsertSize, InsertDev, Platform, Model, BioProject)) %>% # 0, 0, ILLUMINA, Illumina HiSeq 2000, PRJNA523380
+  select(-c(Study_Pubmed_id, ProjectID, SampleType, TaxID, ScientificName)) %>% # 2, 523380, simple, 9606, Homo sapiens
+  select(-c(CenterName, Consent)) %>% # BROAD INSTITUTE, public
+  select(
+    -c( # NA cols
+      g1k_pop_code,
+      source,
+      g1k_analysis_group,
+      Subject_ID,
+      Disease,
+      Tumor,
+      Affection_Status,
+      Analyte_Type,
+      Histological_Type,
+      Body_Site,
+      dbgap_study_accession
+    )
+  ) %>%
+  rename(
+    wgs_run_accession = "Run",
+    wgs_release_date = "ReleaseDate",
+    wgs_load_date = "LoadDate",
+    wgs_spots = "spots",
+    wgs_bases = "bases", # identical to rna_bases in cellLine_summary
+    wgs_spots_with_mates = "spots_with_mates",
+    wgs_avgLength = "avgLength",
+    wgs_size_MB = "size_MB",
+    wgs_exp_accession = "Experiment",
+    study_accession = "SRAStudy",
+    wgs_sample_accession = "Sample",
+    sex = "Sex",
+    bio_sample = "BioSample",
+    wgs_submission_accession = "Submission",
+    wgs_run_hash = "RunHash",
+    wgs_read_hash = "ReadHash"
+  ) %>%
+  # Separate into sampleID and tissueType
+  separate(
+    SampleName,
+    into = c("sampleID", "tissueType"),
+    sep = "_",
+    extra = "merge"
+  ) %>%
+  filter(sampleID %in% matched_cellLines) %>% # drops to 328 as expected
+
+  # Match the metadata
+  left_join(
+    cellLine_metadata %>% filter(`Assay.Type` == "WGS") %>% select(-`Assay.Type`),
+    by = c(
+      "wgs_run_accession" = "Run",
+      "wgs_bases" = "Bases",
+      "wgs_avgLength" = "AvgSpotLen",
+      "wgs_exp_accession" = "Experiment",
+      "study_accession" = "SRA.Study",
+      "bio_sample" = "BioSample",
+      "sampleID",
+      "tissueType",
+      "sex"
+    )
+  ) %>%
+  rename(
+    wgs_create_date = "create_date",
+    wgs_version = "version"
+  )
+```
+
+# Create a large cell line summary df by merging the metadata, RNA-Seq, and WGS dfs
+
+```{r}
+cellLine_summary <- rnaseq_metadata %>%
+  left_join(wgs_metadata) %>%
+  relocate(
+    sampleID,
+    cell_line,
+    tissueType,
+    tissue,
+    disease,
+    disease_stage,
+    sex,
+    age,
+    ethnicity,
+    study_accession,
+    bio_sample,
+    biomaterial_provider,
+    .before = rna_run_accession
+  ) %>%
+  relocate(
+    rna_run_accession,
+    rna_spots,
+    rna_bases,
+    rna_spots_with_mates,
+    rna_avgLength,
+    rna_size_MB,
+    rna_exp_accession,
+    rna_sample_accession,
+    rna_submission_accession,
+    rna_create_date,
+    rna_load_date,
+    rna_release_date,
+    rna_run_hash,
+    rna_read_hash,
+    rna_version,
+    .before = wgs_run_accession
+  ) %>%
+  relocate(
+    wgs_run_accession,
+    wgs_spots,
+    wgs_bases,
+    wgs_spots_with_mates,
+    wgs_avgLength,
+    wgs_size_MB,
+    wgs_exp_accession,
+    wgs_sample_accession,
+    wgs_submission_accession,
+    wgs_create_date,
+    wgs_load_date,
+    wgs_release_date,
+    wgs_run_hash,
+    wgs_read_hash,
+    wgs_version,
+    .after = rna_version
+  )
+```
+
+# Create output files
+
+## Outpute the cell line summary
+
+```{r}
+# write.table(
+#   cellLine_summary,
+#   file = "~/fusions/01_IdentifyCellLines/cellLine_summary.tsv",
+#   sep = "\t",
+#   row.names = FALSE, # don't add row numbers
+#   col.names = TRUE, # add headers
+#   quote = FALSE # don't put cells in quotes
+# ) 
+```
+
+## Output list of RNA run accessions + lists of the first and last 164 accessions to abide by COSMOS job limit
+
+```{r}
+# write.table(
+#   cellLine_summary %>% select(rna_run_accession),
+#   file = "~/fusions/01_IdentifyCellLines/rnaseq_run_SraAccList.list",
+#   sep = "\t",
+#   row.names = FALSE, # don't add row numbers
+#   col.names = FALSE, # don't add headers
+#   quote = FALSE # don't put cells in quotes
+# ) 
+# 
+# write.table(
+#   cellLine_summary %>% select(rna_run_accession) %>% slice(1:164),
+#   file = "~/fusions/01_IdentifyCellLines/first164_rnaRunAcc.list",
+#   sep = "\t",
+#   row.names = FALSE,
+#   col.names = FALSE,
+#   quote = FALSE
+# )
+# 
+# write.table(
+#   cellLine_summary %>% select(rna_run_accession) %>% slice(165:328),
+#   file = "~/fusions/01_IdentifyCellLines/last164_rnaRunAcc.list",
+#   sep = "\t",
+#   row.names = FALSE,
+#   col.names = FALSE,
+#   quote = FALSE
+# )
+```
+
+## Output list of WGS run accessions + lists of the first and last 164 accessions to abide by COSMOS job limit
+
+```{r}
+# write.table(
+#   cellLine_summary %>% select(wgs_run_accession),
+#   file = "~/fusions/01_IdentifyCellLines/wgs_run_SraAccList.list",
+#   sep = "\t",
+#   row.names = FALSE, # don't add row numbers
+#   col.names = FALSE, # don't add headers
+#   quote = FALSE #  don't put cells in quotes
+# ) 
+# 
+# write.table(
+#   cellLine_summary %>% select(wgs_run_accession) %>% slice(1:164),
+#   file = "~/fusions/01_IdentifyCellLines/first164_wgsRunAcc.list",
+#   sep = "\t",
+#   row.names = FALSE,
+#   col.names = FALSE,
+#   quote = FALSE
+# )
+# 
+# write.table(
+#   cellLine_summary %>% select(wgs_run_accession) %>% slice(165:328),
+#   file = "~/fusions/01_IdentifyCellLines/last164_wgsRunAcc.list",
+#   sep = "\t",
+#   row.names = FALSE,
+#   col.names = FALSE,
+#   quote = FALSE
+# )
+```
+
+# Save workspace
+
+```{r}
+save.image("identifyCellLines.RData")
+```
