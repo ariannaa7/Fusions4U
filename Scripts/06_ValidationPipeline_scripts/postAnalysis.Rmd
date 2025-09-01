@@ -1,0 +1,944 @@
+---
+title: "Post-pipeline analysis of pipeline validated fusions"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Identifying validated fusions, sanity checking proposed genomic breakpoints, and creating a large dataframe of all validated fusions"
+version: "1.0.0"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load image from previous script
+
+```{r}
+load("~/fusions/Scripts/06_ValidationPipeline_scripts/pipelineInput.RData")
+```
+
+## Load packages
+
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0
+```
+
+# Load in fusion support information - outputted from validation pipeline
+
+## Fusion support summary txt files
+
+```{r}
+fusionSupportSummary <-
+  read.csv(
+    "~/fusions/06_ValidationPipeline/pipelineOutput/fusion_support_summary_table.txt",
+    sep = "\t",
+    header = TRUE
+  )
+
+fusionSummary_breakpointSupportingReads <-
+  read.csv(
+    "~/fusions/06_ValidationPipeline/pipelineOutput/fusion_summary_table_breakpoint_supporting_reads.txt",
+    sep = "\t",
+    header = TRUE
+  )
+
+validatedFusionIds <- fusionSupportSummary %>% # 33032 inputted!
+  filter(discordant_read_support == "TRUE") # 10997! discordant read support is enough to validate! 9473 of these have breakpoint support as well!
+```
+
+## Genomic predictions - COME BACK TO THIS
+
+```{r}
+fusionSummary_breakpoints <-
+  fusionSummary_breakpointSupportingReads %>%
+  select(
+    fusion_id,
+    threeprime_breakpoint_coordinate,
+    fiveprime_breakpoint_coordinate
+  ) %>%
+  distinct() %>% # 52407
+  separate_rows(threeprime_breakpoint_coordinate,  # 58657, when a partner has one breakpoint, but the other has multiple possible then the multiple are sep by ;. Separate these so they all have their own row
+    fiveprime_breakpoint_coordinate,
+    sep = ";"
+  ) %>%
+  distinct() %>% # 58440
+  dplyr::rename(hg19_threeprime_breakpoint = "threeprime_breakpoint_coordinate") %>%
+  dplyr::rename(hg19_fiveprime_breakpoint = "fiveprime_breakpoint_coordinate") %>%
+  group_by(fusion_id) %>%
+  summarize(
+    hg19_threeprime_breakpoint = paste(hg19_threeprime_breakpoint, collapse = ","),# join instances of multiple potential breakpoints
+    hg19_fiveprime_breakpoint = paste(hg19_fiveprime_breakpoint, collapse = ",")
+  ) # 9473
+
+fusionSupportSummary_breakCoords <- fusionSupportSummary %>%
+  left_join(fusionSummary_breakpoints)
+```
+
+# Join the validation summary with pipeline input and then with Arriba & STAR-Fusion cols
+
+```{r}
+fusionSummary <- pipeline_input_allCols %>% # 33032
+  left_join(fusionSupportSummary_breakCoords, by = "fusion_id") %>%
+  relocate(
+    discordant_read_support,
+    breakpoint_support,
+    hg19_threeprime_breakpoint,
+    hg19_fiveprime_breakpoint,
+    .after = "fusion_id"
+  )
+```
+
+# Run sanity check on hg19 breakpoint coordinates
+
+## Prep for hg19 breakpoint check
+
+```{r}
+validations_hg19_breakpointCheck_prep <-
+  fusionSummary %>% # 33032 Arriba & STAR-Fusion total validated or not
+  filter(breakpoint_support == "TRUE") %>% # 9473 with breakpoint support
+
+  # Pull columns to check breakpoint coords against inputted (lifted/hg19) coords
+  select(
+    fusion_id,
+    discordant_read_support,
+    breakpoint_support,
+    program,
+    fusion_name,
+    sampleID,
+    tissueType,
+    wgs_run_accession,
+    fiveprime_transcribed_strand,
+    hg19_fiveprime_chr,
+    hg19_fiveprime_geneStart,
+    hg19_fiveprime_fusion_junction,
+    hg19_fiveprime_breakpoint,
+    hg19_fiveprime_geneEnd,
+    threeprime_transcribed_strand,
+    hg19_threeprime_chr,
+    hg19_threeprime_geneStart,
+    hg19_threeprime_fusion_junction,
+    hg19_threeprime_breakpoint,
+    hg19_threeprime_geneEnd
+  ) %>%
+  separate_rows(hg19_fiveprime_breakpoint, hg19_threeprime_breakpoint, sep = ",") %>% # 58440, separated by the comma sep we added
+  separate(
+    hg19_fiveprime_breakpoint,
+    c(
+      "hg19_fiveprime_breakpoint_chr",
+      "hg19_fiveprime_breakpoint_coord"
+    ),
+    ":"
+  ) %>%
+  separate(
+    hg19_threeprime_breakpoint,
+    c(
+      "hg19_threeprime_breakpoint_chr",
+      "hg19_threeprime_breakpoint_coord"
+    ),
+    ":"
+  ) %>%
+  # Update from character to integer!
+  mutate(
+    hg19_fiveprime_breakpoint_coord = as.numeric(hg19_fiveprime_breakpoint_coord),
+    hg19_threeprime_breakpoint_coord = as.numeric(hg19_threeprime_breakpoint_coord)
+  ) %>%
+  filter(
+    hg19_fiveprime_chr == hg19_fiveprime_breakpoint_chr &
+      hg19_threeprime_chr == hg19_threeprime_breakpoint_chr
+  ) %>% # all 58440 pass!
+
+  # Omit unnecessary cols, pass the sanity check
+  select(-hg19_fiveprime_breakpoint_chr, -hg19_threeprime_breakpoint_chr) %>%
+  # the padding is added per pipeline paper (BMC Bioinformatics 2023)! Padding is adding when searching for discordant reads. For each read found, there is a 500 bp breakpoint in the direction of breakpoint and 50 bp in opposite. So theoretically, if discordant read is found in or near this buffer region, the breakpoint could be found in an unexpected area! Conclusion, add the buffer used for identifying discordant reads. "breakpoin_searchStart" isn't a great description, but since we aren't going to check the buffer region of every single discordant read, this is a catch all
+  mutate(fiveprime_breakpoint_searchStart = case_when(
+    (fiveprime_transcribed_strand == "+") ~ (hg19_fiveprime_fusion_junction - 500),
+    (fiveprime_transcribed_strand == "-") ~ (hg19_fiveprime_geneStart - 2000),
+  )) %>%
+  mutate(fiveprime_breakpoint_searchEnd = case_when(
+    (fiveprime_transcribed_strand == "+") ~ (hg19_fiveprime_geneEnd + 2000),
+    (fiveprime_transcribed_strand == "-") ~ (hg19_fiveprime_fusion_junction + 500)
+  )) %>%
+  mutate(threeprime_breakpoint_searchStart = case_when(
+    (threeprime_transcribed_strand == "+") ~ (hg19_threeprime_geneStart - 2000),
+    (threeprime_transcribed_strand == "-") ~ (hg19_threeprime_fusion_junction - 500)
+  )) %>%
+  mutate(threeprime_breakpoint_searchEnd = case_when(
+    (threeprime_transcribed_strand == "+") ~ (hg19_threeprime_fusion_junction + 500),
+    (threeprime_transcribed_strand == "-") ~ (hg19_threeprime_geneEnd + 2000)
+  )) %>%
+  # Add this id since there are no repeats now, but when we sep into just 5' and 3' there will be! This will be important to keep track when lifiting breakpoint coords!
+  mutate(breakpoint_fusionID = row_number()) %>%
+  relocate(breakpoint_fusionID, .before = fusion_id)
+```
+
+## hg19 5' breakpoint check
+
+```{r}
+fiveprime_hg19_breakpointCheck <-
+  validations_hg19_breakpointCheck_prep %>% # 58440, as expected
+
+  # Pull relevant 5' columns
+  select(
+    breakpoint_fusionID,
+    fusion_id,
+    discordant_read_support,
+    breakpoint_support,
+    program,
+    fusion_name,
+    sampleID,
+    tissueType,
+    wgs_run_accession,
+    fiveprime_transcribed_strand,
+    hg19_fiveprime_chr,
+    hg19_fiveprime_geneStart,
+    hg19_fiveprime_fusion_junction,
+    hg19_fiveprime_breakpoint_coord,
+    hg19_fiveprime_geneEnd,
+    fiveprime_breakpoint_searchStart,
+    fiveprime_breakpoint_searchEnd
+  ) %>%
+  # Calculate the width of the region that will be part of the fusion transcript
+  mutate(fiveprime_fusion_width = case_when(
+    (fiveprime_transcribed_strand == "+") ~ (abs(hg19_fiveprime_geneStart - hg19_fiveprime_fusion_junction) + 1),
+    (fiveprime_transcribed_strand == "-") ~ (abs(hg19_fiveprime_fusion_junction - hg19_fiveprime_geneEnd) + 1)
+  )) %>%
+  # Breakpoint should be located downstream of fusion transcript
+  mutate(fiveprime_breakpoint_sanityCheck = case_when(
+    ((
+      fiveprime_transcribed_strand == "+" &
+        hg19_fiveprime_fusion_junction <= hg19_fiveprime_breakpoint_coord &
+        hg19_fiveprime_breakpoint_coord <
+          fiveprime_breakpoint_searchEnd
+    ) |
+      (
+        fiveprime_transcribed_strand == "-" &
+          fiveprime_breakpoint_searchStart < hg19_fiveprime_breakpoint_coord &
+          hg19_fiveprime_fusion_junction >=
+            hg19_fiveprime_breakpoint_coord
+      )
+    ) ~ "PASS",
+    TRUE ~ "FAIL"
+  )) %>% # catches situations of breakpoint which isn't located downstream
+
+  # Is the breakpoint found in the buffer region added in the pipeline when searching for discordant reads?
+  mutate(fiveprime_breakpoint_foundInBuffer = case_when(
+    (
+      fiveprime_transcribed_strand == "+" &
+        fiveprime_breakpoint_searchStart <= hg19_fiveprime_breakpoint_coord &
+        hg19_fiveprime_breakpoint_coord <
+          hg19_fiveprime_fusion_junction
+    ) ~ "TRUE",
+    (
+      fiveprime_transcribed_strand == "-" &
+        hg19_fiveprime_fusion_junction < hg19_fiveprime_breakpoint_coord &
+        hg19_fiveprime_breakpoint_coord <=
+          fiveprime_breakpoint_searchEnd
+    ) ~ "TRUE",
+    TRUE ~ "FALSE" # should be FALSE if the breakpoint passed the sanity check! All (and only) breakpoints that failed the sanity check marked "TRUE" in this column, as expected!
+  )) %>% # all 44 instances of breakpoints failing the sanity check are instances where breakpoint lies in the 500bp junction padding/buffer added by the pipeline
+
+  # What is the width between the breakpoint and the fusion junction?
+  mutate(fiveprime_break_junc_width = case_when(
+    (fiveprime_transcribed_strand == "+") ~ ((hg19_fiveprime_breakpoint_coord - hg19_fiveprime_fusion_junction) + 1),
+    (fiveprime_transcribed_strand == "-") ~ ((hg19_fiveprime_fusion_junction - hg19_fiveprime_breakpoint_coord) + 1
+    )
+  )) %>% # Only those that have failed have a width of <= 0, as expected!
+
+  # Is the breakpoint in an intergenic region?
+  mutate(fiveprime_intergenic_breakpoint = case_when(
+    (
+      fiveprime_transcribed_strand == "+" &
+        hg19_fiveprime_breakpoint_coord > hg19_fiveprime_geneEnd
+    ) ~ "TRUE",
+    (
+      fiveprime_transcribed_strand == "-" &
+        hg19_fiveprime_breakpoint_coord < hg19_fiveprime_geneStart
+    ) ~ "TRUE",
+    TRUE ~ "FALSE"
+  )) %>% # all of which passed sanity check
+
+  # If the breakpoint is in an intergenic region, how far away is it from the gene end? Logically, it should be quite close! Recall, most breakpoints are in intronic regions within a gene
+  mutate(fiveprime_intergenic_breakpoint_toGeneEnd_width = case_when(
+    (
+      fiveprime_intergenic_breakpoint == "TRUE" &
+        fiveprime_transcribed_strand == "+"
+    ) ~ (
+      abs(hg19_fiveprime_geneEnd - hg19_fiveprime_breakpoint_coord) + 1
+    ),
+    (
+      fiveprime_intergenic_breakpoint == "TRUE" &
+        fiveprime_transcribed_strand == "-"
+    ) ~ (
+      abs(hg19_fiveprime_breakpoint_coord - hg19_fiveprime_geneStart) + 1
+    ) # distance of an intergenic breakpoint from the end of the gene ranges from 4-469! Acceptable as this is very close to gene end
+  )) # 58440, 44 fail. 14 fusion IDs total fail
+```
+
+## hg19 3' breakpoint check
+```{r}
+threeprime_hg19_breakpointCheck <-
+  validations_hg19_breakpointCheck_prep %>% # 58440, as expected
+
+  # Pull relevant 5' columns
+  select(
+    breakpoint_fusionID,
+    fusion_id,
+    discordant_read_support,
+    breakpoint_support,
+    program,
+    fusion_name,
+    sampleID,
+    tissueType,
+    wgs_run_accession,
+    threeprime_transcribed_strand,
+    hg19_threeprime_chr,
+    hg19_threeprime_geneStart,
+    hg19_threeprime_fusion_junction,
+    hg19_threeprime_breakpoint_coord,
+    hg19_threeprime_geneEnd,
+    threeprime_breakpoint_searchStart,
+    threeprime_breakpoint_searchEnd
+  ) %>%
+  # Calculate the width of the region that will be part of the fusion transcript
+  mutate(threeprime_fusion_width = case_when(
+    (threeprime_transcribed_strand == "+") ~ (abs(hg19_threeprime_fusion_junction - hg19_threeprime_geneEnd) + 1
+    ),
+    (threeprime_transcribed_strand == "-") ~ (abs(hg19_threeprime_geneStart - hg19_threeprime_fusion_junction) + 1
+    )
+  )) %>%
+  # Breakpoint should be located upstream of fusion transcript
+  mutate(threeprime_breakpoint_sanityCheck = case_when(
+    ((
+      threeprime_transcribed_strand == "+" &
+        threeprime_breakpoint_searchStart < hg19_threeprime_breakpoint_coord &
+        hg19_threeprime_fusion_junction >=
+          hg19_threeprime_breakpoint_coord
+    ) |
+      (
+        threeprime_transcribed_strand == "-" &
+          hg19_threeprime_fusion_junction <= hg19_threeprime_breakpoint_coord &
+          hg19_threeprime_breakpoint_coord <
+            threeprime_breakpoint_searchEnd
+      )
+    ) ~ "PASS",
+    TRUE ~ "FAIL"
+  )) %>% # catches situations of breakpoint which isn't located upsream
+
+  # Is the breakpoint found in the buffer region added in the pipeline when searching for discordant reads?
+  mutate(threeprime_breakpoint_foundInBuffer = case_when(
+    (
+      threeprime_transcribed_strand == "+" &
+        hg19_threeprime_fusion_junction < hg19_threeprime_breakpoint_coord &
+        hg19_threeprime_breakpoint_coord <= threeprime_breakpoint_searchEnd
+    ) ~ "TRUE",
+    (
+      threeprime_transcribed_strand == "-" &
+        threeprime_breakpoint_searchStart <= hg19_threeprime_breakpoint_coord &
+        hg19_threeprime_breakpoint_coord < hg19_threeprime_fusion_junction
+    ) ~ "TRUE",
+    TRUE ~ "FALSE" # should be FALSE if the breakpoint passed the sanity check! All (and only) breakpoints that failed the sanity check marked "TRUE" in this column, as expected!
+  )) %>%
+  # What is the width between the breakpoint and the fusion junction?
+  mutate(threeprime_break_junc_width = case_when(
+    (threeprime_transcribed_strand == "+") ~ ((hg19_threeprime_fusion_junction - hg19_threeprime_breakpoint_coord) + 1),
+    (threeprime_transcribed_strand == "-") ~ ((hg19_threeprime_breakpoint_coord - hg19_threeprime_fusion_junction) + 1)
+  )) %>% # Only those that have failed have a width of <= 0, as expected!
+
+  # Is the breakpoint in an intergenic region?
+  mutate(threeprime_intergenic_breakpoint = case_when(
+    (
+      threeprime_transcribed_strand == "+" &
+        hg19_threeprime_breakpoint_coord < hg19_threeprime_geneStart
+    ) ~ "TRUE",
+    (
+      threeprime_transcribed_strand == "-" &
+        hg19_threeprime_breakpoint_coord > hg19_threeprime_geneEnd
+    ) ~ "TRUE",
+    TRUE ~ "FALSE"
+  )) %>% # all of which passed sanity check
+
+  # If the breakpoint is in an intergenic region, how far away is it from the gene start? Logically, it should be quite close! Recall, most breakpoints are in intronic regions within a gene
+  mutate(threeprime_intergenic_breakpoint_toGeneStart_width = case_when(
+    (threeprime_intergenic_breakpoint == "TRUE" & threeprime_transcribed_strand == "+") ~ 
+      (abs(hg19_threeprime_breakpoint_coord - hg19_threeprime_geneStart) + 1),
+    (threeprime_intergenic_breakpoint == "TRUE" & threeprime_transcribed_strand == "-") ~
+      (abs(hg19_threeprime_geneEnd - hg19_threeprime_breakpoint_coord) + 1) # distance of an intergenic breakpoint from the start of the gene ranges from 2-245! Acceptable as this is very close to gene end
+  )) # 58440, 16 fail. 10 fusion IDs total fail
+```
+
+## Create a df with fusion IDs that failed the hg19 sanity check
+
+```{r}
+sanityCheck_hg19_breakpointFailed_fusionIDs <-
+  bind_rows(
+    # Create a df with failed IDs
+    fiveprime_hg19_breakpointCheck %>%
+      filter(fiveprime_breakpoint_sanityCheck == "FAIL") %>%
+      select(fusion_id),
+    threeprime_hg19_breakpointCheck %>%
+      filter(threeprime_breakpoint_sanityCheck == "FAIL") %>%
+      select(fusion_id)
+  ) %>%
+  dplyr::rename(failed_fusion_id = "fusion_id") %>%
+  distinct()
+```
+
+## Join hg19 breakpoint coordinates so each fusion is represented on one line only
+
+### Passed for fusion breakpoint coordinates where BOTH the 5' and 3' partner for one breakpoint_fusionID PASS
+
+```{r}
+hg19_passed_breakpoint_combination_coords <-
+  fiveprime_hg19_breakpointCheck %>% # 58440
+  full_join(threeprime_hg19_breakpointCheck) %>% # 58440
+  filter(
+    fiveprime_breakpoint_sanityCheck == "PASS" &
+      threeprime_breakpoint_sanityCheck == "PASS"
+  ) %>% # 58380, lose 7 fusions that have 0 5'/3' breakpoints that both pass!
+  group_by(fusion_id) %>%
+  unite(
+    "hg19_fiveprime_breakpoint",
+    hg19_fiveprime_chr,
+    hg19_fiveprime_breakpoint_coord,
+    sep = ":"
+  ) %>%
+  unite(
+    "hg19_threeprime_breakpoint",
+    hg19_threeprime_chr,
+    hg19_threeprime_breakpoint_coord,
+    sep = ":"
+  ) %>%
+  summarize(
+    hg19_threeprime_breakpoint_sanityPassingPair = paste(hg19_threeprime_breakpoint, collapse = ","), # join instances of multiple potential breakpoints
+    hg19_fiveprime_breakpoint_sanityPassingPair = paste(hg19_fiveprime_breakpoint, collapse = ",")
+  ) %>% # down to 9466!
+  ungroup()
+```
+
+### Failed for fusion breakpoint coordinates where EITHER the 5' or/and 3' partner for one breakpoint_fusionID FAIL
+
+```{r}
+hg19_failed_breakpoint_combination_coords <-
+  fiveprime_hg19_breakpointCheck %>% # 58440
+  full_join(threeprime_hg19_breakpointCheck) %>% # 58440
+  filter(
+    fiveprime_breakpoint_sanityCheck == "FAIL" |
+      threeprime_breakpoint_sanityCheck == "FAIL"
+  ) %>% # 60
+  group_by(fusion_id) %>%
+  unite(
+    "hg19_fiveprime_breakpoint",
+    hg19_fiveprime_chr,
+    hg19_fiveprime_breakpoint_coord,
+    sep = ":"
+  ) %>%
+  unite(
+    "hg19_threeprime_breakpoint",
+    hg19_threeprime_chr,
+    hg19_threeprime_breakpoint_coord,
+    sep = ":"
+  ) %>%
+  summarize(
+    hg19_threeprime_breakpoint_sanityFailingPair = paste(hg19_threeprime_breakpoint, collapse = ","), # join instances of multiple potential breakpoints
+    hg19_fiveprime_breakpoint_sanityFailingPair = paste(hg19_fiveprime_breakpoint, collapse = ",")
+  ) %>%
+  ungroup() # 20 entries
+```
+
+### Unite the passed and failed breakpoint coords
+
+```{r}
+hg19_united_breakpoint_coords <-
+  hg19_passed_breakpoint_combination_coords %>%
+  full_join(hg19_failed_breakpoint_combination_coords) # all 9473 fusions are represented!
+```
+
+# Run sanity check on hg38 breakpoint coordinates
+
+## Separate the dfs into 5' and 3' then lift breakpoint coord to hg38
+
+### 5' sep & lift
+
+```{r}
+# Do not use range between breakpoint & junction (or vice versa depending on partner and strand) as start and end! We lost more ranges in liftover because the newly lifted fusion junc didn't match what was outputted in hg38 by Arriba & STAR-Fusion.
+# It was a minimal loss, but still! An issue with the range provided rather than the coord, so just provide the coordinate (0-based)
+
+fiveprime_hg19_breakpoint_prelift <-
+  fiveprime_hg19_breakpointCheck %>% # 58440
+  unite("ID",
+    breakpoint_fusionID:fusion_id,
+    sep = "_",
+    remove = FALSE
+  ) %>% # use the combination of these IDs to identify each fusion breakpoint coord and do an accurate join back together
+  select(hg19_fiveprime_chr, hg19_fiveprime_breakpoint_coord, ID) %>%
+  # Instead of using combo of fusion junc and breakpoint as a range here, just give it one coordinate (breakpoint) to prevent start-end discrepancies
+  mutate(
+    start_hg19_fiveprime_breakpoint_coord_0based = hg19_fiveprime_breakpoint_coord - 1,
+    end_hg19_fiveprime_breakpoint_coord_0based = hg19_fiveprime_breakpoint_coord
+  ) %>%
+  select(
+    hg19_fiveprime_chr,
+    start_hg19_fiveprime_breakpoint_coord_0based,
+    end_hg19_fiveprime_breakpoint_coord_0based,
+    ID
+  )
+
+# write.table(
+#   fiveprime_hg19_breakpoint_prelift,
+#   file = "~/fusions/06_ValidationPipeline/liftoverBEDs/hg19_fiveprime_breakpoints.bed",
+#   sep = "\t",
+#   row.names = FALSE,
+#   col.names = FALSE,
+#   quote = FALSE
+# )
+# Go to https://genome.ucsc.edu/cgi-bin/hgLiftOver, lift from hg19 to hg38 and keep default settings
+# Submit the hg19_fiveprime_breakpoints.bed file
+# Results: successfully converted 58438/58440 records (right click "view conversions", download linked file as hg38_fiveprime_breakpoints.bed in liftoverBEDs)
+
+fiveprime_hg38_breakpoint_postlift <-
+  read.csv(
+    "~/fusions/06_ValidationPipeline/liftoverBEDs/hg38_fiveprime_breakpoints.bed",
+    header = FALSE,
+    sep = "\t"
+  ) %>%
+  # Output is 0-based, switch back to 1-based
+  mutate(
+    V2 = V2 + 1,
+    V3 = V3
+  ) %>%
+  filter(V2 == V3) %>% # sanity check, all 58438 passed! These should be the same number after converting back to 1-based since we only technically lifted one coordinate
+  select(-V3) %>% # no longer necessary
+
+  # Rename cols for clarity
+  dplyr::rename(
+    hg38_fiveprime_chr_lifted = "V1",
+    hg38_fiveprime_breakpoint_coord = "V2",
+    ID = "V4" # rename for easy matching
+  )
+```
+
+### 3' sep & lift
+
+```{r}
+threeprime_hg19_breakpoint_prelift <-
+  threeprime_hg19_breakpointCheck %>% # 58440
+  unite("ID",
+    breakpoint_fusionID:fusion_id,
+    sep = "_",
+    remove = FALSE
+  ) %>% # use the combination of these IDs to identify each fusion breakpoint coord and do an accurate join back together
+  select(hg19_threeprime_chr, hg19_threeprime_breakpoint_coord, ID) %>%
+  mutate(
+    start_hg19_threeprime_breakpoint_coord_0based = hg19_threeprime_breakpoint_coord - 1,
+    end_hg19_threeprime_breakpoint_coord_0based = hg19_threeprime_breakpoint_coord
+  ) %>%
+  select(
+    hg19_threeprime_chr,
+    start_hg19_threeprime_breakpoint_coord_0based,
+    end_hg19_threeprime_breakpoint_coord_0based,
+    ID
+  )
+
+# write.table(
+#   threeprime_hg19_breakpoint_prelift,
+#   file = "~/fusions/06_ValidationPipeline/liftoverBEDs/hg19_threeprime_breakpoints.bed",
+#   sep = "\t",
+#   row.names = FALSE,
+#   col.names = FALSE,
+#   quote = FALSE
+# )
+# Go to https://genome.ucsc.edu/cgi-bin/hgLiftOver, lift from hg19 to hg38 and keep default settings
+# Submit the hg19_threeprime_breakpoints.bed file
+# Results: successfully converted 58437/58440 records (right click "view conversions", download linked file as hg38_threeprime_breakpoints.bed in liftoverBEDs)
+
+threeprime_hg38_breakpoint_postlift <-
+  read.csv(
+    "~/fusions/06_ValidationPipeline/liftoverBEDs/hg38_threeprime_breakpoints.bed",
+    header = FALSE,
+    sep = "\t"
+  ) %>%
+  # Output is 0-based, switch back to 1-based
+  mutate(
+    V2 = V2 + 1,
+    V3 = V3
+  ) %>%
+  filter(V2 == V3) %>% # sanity check, all 58437 passed! These should be the same number after converting back to 1-based since we only technically lifted one coordinate
+  select(-V3) %>% # no longer necessary
+
+  # Rename cols for clarity
+  dplyr::rename(
+    hg38_threeprime_chr_lifted = "V1",
+    hg38_threeprime_breakpoint_coord = "V2",
+    ID = "V4" # rename for easy matching
+  )
+```
+
+## Join the lifted hg38 breakpoint coordinates back together
+
+```{r}
+hg38_breakpoint_coords <-
+  full_join(fiveprime_hg38_breakpoint_postlift,
+    threeprime_hg38_breakpoint_postlift,
+    by = "ID"
+  ) %>% # 58440
+  na.omit() %>% # drops to 58435 because of lift discrepancies. Represents loss of 2 fusion IDs
+  relocate(ID, .before = hg38_fiveprime_chr_lifted) %>%
+  separate(ID, c("breakpoint_fusionID", "fusion_id"), "_") %>%
+  mutate(
+    breakpoint_fusionID = as.integer(breakpoint_fusionID),
+    fusion_id = as.integer(fusion_id)
+  )
+```
+
+## Create a df with fusion IDs that were lost in lift from hg19 to hg38
+
+```{r}
+sanityCheck_hg38_breakpointCoordFailedLift_fusionIDs <-
+  validations_hg19_breakpointCheck_prep %>%
+  select(fusion_id) %>%
+  distinct() %>% # all the fusion IDs with breakpoint support
+  anti_join(hg38_breakpoint_coords) %>% # minus the ones that survived the liftover to hg38
+  anti_join(
+    sanityCheck_hg19_breakpointFailed_fusionIDs,
+    by = c("fusion_id" = "failed_fusion_id")
+  ) %>% # minus the ones that failed hg19 sanity check. Lost 2 fusion IDs in liftover!
+  dplyr::rename(lostInLift_fusion_id = "fusion_id") # 2 were lost in lift
+```
+
+## Prep for hg38 breakpoint check
+
+```{r}
+validations_hg38_breakpointCheck_prep <- fusionSummary %>%
+  right_join(validations_hg19_breakpointCheck_prep) %>% # 58440!
+  right_join(hg38_breakpoint_coords) %>% # 58435, after joining with the hg38 lifted breakpoint coords! Recall that we lost some coordinates in lift!
+  filter(breakpoint_support == "TRUE") %>% # 58435, sanity check! Should already contain only entries with breakpoint support
+  filter(
+    hg38_fiveprime_chr_lifted == hg38_fiveprime_chr &
+      hg38_threeprime_chr_lifted == hg38_threeprime_chr
+  ) %>% # 58435, sanity check! The chromosomes we already had for hg38 should match what we lifted to when lifting hg19 breakpoint coords
+  select(-hg38_fiveprime_chr_lifted, -hg38_threeprime_chr_lifted) %>% # no longer needed since sanity check passed
+  select(
+    breakpoint_fusionID,
+    fusion_id,
+    discordant_read_support,
+    breakpoint_support,
+    program,
+    fusion_name,
+    sampleID,
+    tissueType,
+    wgs_run_accession,
+    fiveprime_transcribed_strand,
+    hg38_fiveprime_chr,
+    hg38_fiveprime_gene_gtfStart,
+    hg38_fiveprime_fusion_junction,
+    hg38_fiveprime_breakpoint_coord,
+    hg38_fiveprime_gene_gtfEnd,
+    threeprime_transcribed_strand,
+    hg38_threeprime_chr,
+    hg38_threeprime_gene_gtfStart,
+    hg38_threeprime_fusion_junction,
+    hg38_threeprime_breakpoint_coord,
+    hg38_threeprime_gene_gtfEnd
+  ) %>%
+  # the padding is added per pipeline paper (BMC Bioinformatics 2023)! Padding is adding when searching for discordant reads. For each read found, there is a 500 bp breakpoint in the direction of breakpoint and 50 bp in opposite. So theoretically, if discordant read is found in or near this buffer region, the breakpoint could be found in an unexpected area! Conclusion, add the buffer used for identifying discordant reads. "breakpoin_searchStart" isn't a great description, but since we aren't going to check the buffer region of every single discordant read, this is a catch all
+  mutate(fiveprime_breakpoint_searchStart = case_when(
+    (fiveprime_transcribed_strand == "+") ~ (hg38_fiveprime_fusion_junction - 500),
+    (fiveprime_transcribed_strand == "-") ~ (hg38_fiveprime_gene_gtfStart - 2000),
+  )) %>%
+  mutate(fiveprime_breakpoint_searchEnd = case_when(
+    (fiveprime_transcribed_strand == "+") ~ (hg38_fiveprime_gene_gtfEnd + 2000),
+    (fiveprime_transcribed_strand == "-") ~ (hg38_fiveprime_fusion_junction + 500)
+  )) %>%
+  mutate(threeprime_breakpoint_searchStart = case_when(
+    (threeprime_transcribed_strand == "+") ~ (hg38_threeprime_gene_gtfStart - 2000),
+    (threeprime_transcribed_strand == "-") ~ (hg38_threeprime_fusion_junction - 500)
+  )) %>%
+  mutate(threeprime_breakpoint_searchEnd = case_when(
+    (threeprime_transcribed_strand == "+") ~ (hg38_threeprime_fusion_junction + 500),
+    (threeprime_transcribed_strand == "-") ~ (hg38_threeprime_gene_gtfEnd + 2000)
+  ))
+```
+
+## hg38 5' breakpoint check
+
+```{r}
+fiveprime_hg38_breakpointCheck <-
+  validations_hg38_breakpointCheck_prep %>% # 58435, as expected
+
+  # Pull relevant 5' columns
+  select(
+    breakpoint_fusionID,
+    fusion_id,
+    discordant_read_support,
+    breakpoint_support,
+    program,
+    fusion_name,
+    sampleID,
+    tissueType,
+    wgs_run_accession,
+    fiveprime_transcribed_strand,
+    hg38_fiveprime_chr,
+    hg38_fiveprime_gene_gtfStart,
+    hg38_fiveprime_fusion_junction,
+    hg38_fiveprime_breakpoint_coord,
+    hg38_fiveprime_gene_gtfEnd,
+    fiveprime_breakpoint_searchStart,
+    fiveprime_breakpoint_searchEnd
+  ) %>%
+  # Breakpoint should be located downstream of fusion transcript
+  mutate(fiveprime_breakpoint_sanityCheck = case_when(
+    ((
+      fiveprime_transcribed_strand == "+" &
+        hg38_fiveprime_fusion_junction <= hg38_fiveprime_breakpoint_coord &
+        hg38_fiveprime_breakpoint_coord < fiveprime_breakpoint_searchEnd
+    ) |
+      (
+        fiveprime_transcribed_strand == "-" &
+          fiveprime_breakpoint_searchStart < hg38_fiveprime_breakpoint_coord &
+          hg38_fiveprime_fusion_junction >= hg38_fiveprime_breakpoint_coord
+      )
+    ) ~ "PASS",
+    TRUE ~ "FAIL"
+  )) %>% # catches situations of breakpoint which isn't located downstream # 58386 pass! Of the 49 which failed, 5 represent new failures for IDs 18421 and 28597. The other failures represent fusion IDs that already failed hg19 sanity check
+
+  # Don't check if it is in buffer region. Most failures are, but it is a bit imperfect since hg38 is not what was inputted. Just accept as sanity fails! Fusion ID 28597 for example lifted >20 Mb away
+
+  # Is the breakpoint in an intergenic region?
+  mutate(fiveprime_intergenic_breakpoint = case_when(
+    (
+      fiveprime_transcribed_strand == "+" &
+        hg38_fiveprime_breakpoint_coord > hg38_fiveprime_gene_gtfEnd
+    ) ~ "TRUE",
+    (
+      fiveprime_transcribed_strand == "-" &
+        hg38_fiveprime_breakpoint_coord < hg38_fiveprime_gene_gtfStart
+    ) ~ "TRUE",
+    TRUE ~ "FALSE"
+  )) %>% # all of which passed sanity check
+
+  # If the breakpoint is in an intergenic region, how far away is it from the gene end? Logically, it should be quite close! Recall, most breakpoints are in intronic regions within a gene
+  mutate(fiveprime_intergenic_breakpoint_toGeneEnd_width = case_when(
+    (fiveprime_intergenic_breakpoint == "TRUE" & fiveprime_transcribed_strand == "+") ~ ( abs(hg38_fiveprime_gene_gtfEnd - hg38_fiveprime_breakpoint_coord) + 1),
+    (fiveprime_intergenic_breakpoint == "TRUE" & fiveprime_transcribed_strand == "-") ~ (abs(hg38_fiveprime_breakpoint_coord - hg38_fiveprime_gene_gtfStart) + 1)
+  )) # distance of an intergenic breakpoint from the end of the gene ranges from 4-469 (except for fusion ID 28597 which failed breakpoint sanity check and will be filtered out anyways)! Acceptable as this is very close to gene end # 58386 pass, 49 fail. 16 fusion IDs total fail
+```
+
+## hg38 3' breakpoint check
+
+```{r}
+threeprime_hg38_breakpointCheck <-
+  validations_hg38_breakpointCheck_prep %>% # 58435, as expected
+
+  # Pull relevant 3' columns
+  select(
+    breakpoint_fusionID,
+    fusion_id,
+    discordant_read_support,
+    breakpoint_support,
+    program,
+    fusion_name,
+    sampleID,
+    tissueType,
+    wgs_run_accession,
+    threeprime_transcribed_strand,
+    hg38_threeprime_chr,
+    hg38_threeprime_gene_gtfStart,
+    hg38_threeprime_fusion_junction,
+    hg38_threeprime_breakpoint_coord,
+    hg38_threeprime_gene_gtfEnd,
+    threeprime_breakpoint_searchStart,
+    threeprime_breakpoint_searchEnd
+  ) %>%
+  # Breakpoint should be located upstream of fusion transcript
+  mutate(threeprime_breakpoint_sanityCheck = case_when(
+    ((
+      threeprime_transcribed_strand == "+" &
+        threeprime_breakpoint_searchStart < hg38_threeprime_breakpoint_coord &
+        hg38_threeprime_fusion_junction >= hg38_threeprime_breakpoint_coord
+    ) |
+      (
+        threeprime_transcribed_strand == "-" &
+          hg38_threeprime_fusion_junction <= hg38_threeprime_breakpoint_coord &
+          hg38_threeprime_breakpoint_coord < threeprime_breakpoint_searchEnd
+      )
+    ) ~ "PASS",
+    TRUE ~ "FAIL"
+  )) %>% # catches situations of breakpoint which isn't located upstream # 58417 pass! Of the 18 that failed, 2 represent new failures for fusion ID 18421. The other failures represent fusion IDs that already failed hg19 sanity check.
+
+  # Don't check if it is in buffer region. Most failures are, but it is a bit imperfect since hg38 is not what was inputted. Just accept as sanity fails! Fusion ID 18421 for example lifted >20 Mb away
+
+  # Is the breakpoint in an intergenic region?
+  mutate(threeprime_intergenic_breakpoint = case_when(
+    (
+      threeprime_transcribed_strand == "+" &
+        hg38_threeprime_breakpoint_coord < hg38_threeprime_gene_gtfStart
+    ) ~ "TRUE",
+    (
+      threeprime_transcribed_strand == "-" &
+        hg38_threeprime_breakpoint_coord > hg38_threeprime_gene_gtfEnd
+    ) ~ "TRUE",
+    TRUE ~ "FALSE"
+  )) %>% # all of which passed sanity check.
+
+  # If the breakpoint is in an intergenic region, how far away is it from the gene start? Logically, it should be quite close! Recall, most breakpoints are in intronic regions within a gene
+  mutate(threeprime_intergenic_breakpoint_toGeneStart_width = case_when(
+    (threeprime_intergenic_breakpoint == "TRUE" & threeprime_transcribed_strand == "+") ~ 
+      (abs(hg38_threeprime_breakpoint_coord - hg38_threeprime_gene_gtfStart) + 1),
+    (threeprime_intergenic_breakpoint == "TRUE" &threeprime_transcribed_strand == "-") ~ 
+      (abs(hg38_threeprime_gene_gtfEnd - hg38_threeprime_breakpoint_coord) + 1) # distance of an intergenic breakpoint from the start of the gene ranges from 2-425 (except badly lifted 18421)! Acceptable as this is very close to gene end
+  )) # 58417 pass, 18 fail. 11 fusion IDs total fail
+```
+
+## Create a df with fusion IDs that failed the hg38 sanity check
+
+```{r}
+sanityCheck_hg38_breakpointFailed_fusionIDs <-
+  bind_rows(
+    # Create a df with failed IDs
+    fiveprime_hg38_breakpointCheck %>%
+      filter(fiveprime_breakpoint_sanityCheck == "FAIL") %>%
+      select(fusion_id),
+    threeprime_hg38_breakpointCheck %>%
+      filter(threeprime_breakpoint_sanityCheck == "FAIL") %>%
+      select(fusion_id)
+  ) %>%
+  dplyr::rename(failed_fusion_id = "fusion_id") %>%
+  distinct() # 22 failed hg38 sanity check (20 of which alrady failed hg19 sanity check)
+
+# Dropped 20 fusion IDs with hg19 breakpoints failing to pass sanity check.
+# Dropped 2 fusion IDs due to LiftOver conversion failures.
+# Dropped 2 fusion IDs due to bad lifts (breakpoint coordinates lifted to locations unreasonably far from gene)
+```
+
+## Join hg38 breakpoint coordinates so each fusion is represented on one line only
+
+### Passed for fusion breakpoint coordinates where BOTH the 5' and 3' partner for one breakpointID PASS
+
+```{r}
+hg38_passed_breakpoint_combination_coords <-
+  fiveprime_hg38_breakpointCheck %>% # 58435
+  full_join(threeprime_hg38_breakpointCheck) %>% # 58435
+  filter(
+    fiveprime_breakpoint_sanityCheck == "PASS" &
+      threeprime_breakpoint_sanityCheck == "PASS"
+  ) %>% # 58370, lose 9 fusion IDs that have 0 5'/3' breakpoints that both pass!
+  group_by(fusion_id) %>%
+  unite(
+    "hg38_fiveprime_breakpoint",
+    hg38_fiveprime_chr,
+    hg38_fiveprime_breakpoint_coord,
+    sep = ":"
+  ) %>%
+  unite(
+    "hg38_threeprime_breakpoint",
+    hg38_threeprime_chr,
+    hg38_threeprime_breakpoint_coord,
+    sep = ":"
+  ) %>%
+  # Join instances of multiple potential breakpoints
+  summarize(
+    hg38_threeprime_breakpoint_sanityPassingPair = paste(hg38_threeprime_breakpoint, collapse = ","),
+    hg38_fiveprime_breakpoint_sanityPassingPair = paste(hg38_fiveprime_breakpoint, collapse = ",")
+  ) %>% # down to 9463! Still includes the 20 fusion IDs that failed hg38 sanity check (20 of which also failed hg19, 2 of which uniquely failed hg38). Doesn't include the 2 IDs that we failed to lift coordinates for
+  ungroup()
+```
+
+### Failed for fusion breakpoint coordinates where EITHER the 5' or/and 3' partner for one breakpointID FAIL
+
+```{r}
+hg38_failed_breakpoint_combination_coords <-
+  fiveprime_hg38_breakpointCheck %>% # 58435
+  full_join(threeprime_hg38_breakpointCheck) %>% # 58435
+  filter(
+    fiveprime_breakpoint_sanityCheck == "FAIL" |
+      threeprime_breakpoint_sanityCheck == "FAIL"
+  ) %>% # 65
+  group_by(fusion_id) %>%
+  unite(
+    "hg38_fiveprime_breakpoint",
+    hg38_fiveprime_chr,
+    hg38_fiveprime_breakpoint_coord,
+    sep = ":"
+  ) %>%
+  unite(
+    "hg38_threeprime_breakpoint",
+    hg38_threeprime_chr,
+    hg38_threeprime_breakpoint_coord,
+    sep = ":"
+  ) %>%
+  # Join instances of multiple potential breakpoints
+  summarize(
+    hg38_threeprime_breakpoint_sanityFailingPair = paste(hg38_threeprime_breakpoint, collapse = ","),
+    hg38_fiveprime_breakpoint_sanityFailingPair = paste(hg38_fiveprime_breakpoint, collapse = ",")
+  ) %>% # down to 22!
+  ungroup()
+```
+
+### Unite the passed and failed breakpoint coords
+
+```{r}
+hg38_united_breakpoint_coords <-
+  hg38_passed_breakpoint_combination_coords %>%
+  full_join(hg38_failed_breakpoint_combination_coords)
+```
+
+# Create dataframes with all predictions + validation status. Use sanity checks to filter
+
+```{r}
+all_fusion_data_filtered_valStatus <-
+  fusionSummary %>% # 33032 Arriba & STAR-Fusion total validated and not
+  select(-hg19_threeprime_breakpoint, -hg19_fiveprime_breakpoint) %>%
+  left_join(hg19_united_breakpoint_coords, by = "fusion_id") %>%
+  left_join(hg38_united_breakpoint_coords, by = "fusion_id") %>%
+  relocate(
+    hg38_fiveprime_breakpoint_sanityPassingPair,
+    hg38_threeprime_breakpoint_sanityPassingPair,
+    hg38_fiveprime_breakpoint_sanityFailingPair,
+    hg38_threeprime_breakpoint_sanityFailingPair,
+    .after = hg38_threeprime_searchEnd
+  ) %>%
+  relocate(
+    hg19_fiveprime_breakpoint_sanityPassingPair,
+    hg19_threeprime_breakpoint_sanityPassingPair,
+    hg19_fiveprime_breakpoint_sanityFailingPair,
+    hg19_threeprime_breakpoint_sanityFailingPair,
+    .after = hg19_threeprime_searchEnd
+  ) %>%
+  relocate(reading_frame_sf, .after = reading_frame_arriba) %>%
+  relocate(annots_sf, .after = tags_arriba) %>%
+  select(-path)
+```
+*Arriba* = 8753 validations
+
+*STAR-Fusion* = 2244 validations
+
+# Identify cell-lines that have no validated predictions
+
+```{r}
+arriba_cellLines_noVal_Preds <-
+  all_fusion_data_filtered_valStatus %>%
+  filter(program == "arriba") %>%
+  group_by(sampleID) %>%
+  filter(all(discordant_read_support == "FALSE")) %>%
+  ungroup() %>%
+  select(sampleID, tissueType) %>%
+  distinct() # Lost 6 cell lines!
+
+sf_cellLines_noVal_Preds <- all_fusion_data_filtered_valStatus %>%
+  filter(program == "star-fusion") %>%
+  group_by(sampleID) %>%
+  filter(all(discordant_read_support == "FALSE")) %>%
+  ungroup() %>%
+  select(sampleID, tissueType) %>%
+  distinct() # Lost 29 cell lines!
+```
+
+
+# Save workspace
+
+```{r}
+# save.image("postAnalysis.RData")
+```

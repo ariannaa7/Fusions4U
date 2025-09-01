@@ -1,0 +1,496 @@
+---
+title: "Creating the input file required for the fusion validation pipeline"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Identifying search regions and creating the pipeline input file with lifted hg19 coordinates. See: 
+https://github.com/VolundurH/wgs_fusion_pipeline for the specified format"
+version: "1.0.0"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load image from previous script
+
+```{r}
+load("~/fusions/Scripts/06_ValidationPipeline_scripts/getCoordinates.RData")
+```
+
+## Load packages
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0
+```
+
+# Assign search region start and end for each partner based on strand
+
+## 5' partner search regions - hg38
+```{r}
+fiveprime_search_hg38 <- all_fusion_data_filtered %>%
+  # Pull only the necessary columns
+  select(
+    fusion_id,
+    hg38_fiveprime_chr,
+    fiveprime_transcribed_strand,
+    hg38_fiveprime_gene_gtfStart,
+    hg38_fiveprime_fusion_junction,
+    hg38_fiveprime_gene_gtfEnd
+  ) %>%
+  mutate(
+    hg38_fiveprime_searchStart = case_when(
+      (fiveprime_transcribed_strand == "+") ~ hg38_fiveprime_fusion_junction, # + strand, search starts at fusion junction
+      (fiveprime_transcribed_strand == "-") ~ hg38_fiveprime_gene_gtfStart # - strand, search starts at start coordinate
+    )
+  ) %>%
+  mutate(
+    hg38_fiveprime_searchEnd = case_when(
+      (fiveprime_transcribed_strand == "+") ~ hg38_fiveprime_gene_gtfEnd, # + strand, search ends at end coordinate
+      (fiveprime_transcribed_strand == "-") ~ hg38_fiveprime_fusion_junction # - strand, search ends at fusion junction
+    )
+  ) %>%
+  filter(
+    hg38_fiveprime_gene_gtfStart <= hg38_fiveprime_fusion_junction &
+      hg38_fiveprime_fusion_junction <= hg38_fiveprime_gene_gtfEnd
+  ) %>% # sanity check, all passed! We already filtered out the ones that failed in preAnalysis %>%
+  filter(
+    hg38_fiveprime_searchStart <= hg38_fiveprime_searchEnd &
+      hg38_fiveprime_gene_gtfStart < hg38_fiveprime_gene_gtfEnd
+  ) %>% # sanity check before converting to 0-based
+  mutate(
+    "hg38_fiveprime_searchStart_0based" = hg38_fiveprime_searchStart - 1, # 0-BASED
+    "hg38_fiveprime_searchEnd_0based" = hg38_fiveprime_searchEnd,
+    "hg38_fiveprime_gene_gtfStart_0based" = hg38_fiveprime_gene_gtfStart - 1, # 0-BASED
+    "hg38_fiveprime_gene_gtfEnd_0based" = hg38_fiveprime_gene_gtfEnd
+  )
+```
+
+*5' partners* = still 33,855 rows
+
+## 3' partner search regions - hg38
+
+```{r}
+threeprime_search_hg38 <- all_fusion_data_filtered %>%
+  # Pull only the necessary columns
+  select(
+    fusion_id,
+    hg38_threeprime_chr,
+    threeprime_transcribed_strand,
+    hg38_threeprime_gene_gtfStart,
+    hg38_threeprime_fusion_junction,
+    hg38_threeprime_gene_gtfEnd
+  ) %>%
+  mutate(
+    hg38_threeprime_searchStart = case_when(
+      (threeprime_transcribed_strand == "+") ~ hg38_threeprime_gene_gtfStart, # + strand, search starts at start coordinate
+      (threeprime_transcribed_strand == "-") ~ hg38_threeprime_fusion_junction # - strand, search starts at fusion junction
+    )
+  ) %>%
+  mutate(
+    hg38_threeprime_searchEnd = case_when(
+      (threeprime_transcribed_strand == "+") ~ hg38_threeprime_fusion_junction, # + strand, search ends at fusion junction
+      (threeprime_transcribed_strand == "-") ~ hg38_threeprime_gene_gtfEnd # - strand, search ends at end coordinate
+    )
+  ) %>%
+  filter(
+    hg38_threeprime_gene_gtfStart <= hg38_threeprime_fusion_junction &
+      hg38_threeprime_fusion_junction <= hg38_threeprime_gene_gtfEnd
+  ) %>% # sanity check, all passed! We already filtered out the ones that failed in preAnalysis
+  filter(
+    hg38_threeprime_searchStart <= hg38_threeprime_searchEnd &
+      hg38_threeprime_gene_gtfStart < hg38_threeprime_gene_gtfEnd
+  ) %>% # sanity check before converting to 0-based
+  mutate(
+    "hg38_threeprime_searchStart_0based" = hg38_threeprime_searchStart - 1, # 0-BASED
+    "hg38_threeprime_searchEnd_0based" = hg38_threeprime_searchEnd,
+    "hg38_threeprime_gene_gtfStart_0based" = hg38_threeprime_gene_gtfStart - 1, # 0-BASED
+    "hg38_threeprime_gene_gtfEnd_0based" = hg38_threeprime_gene_gtfEnd
+  )
+```
+
+*3' partners* = still 33,855 rows
+
+# Prepare & liftover the 5' partner and 3' partner dataframes
+
+## 5' prepare to lift & lift to hg19 with UCSC LiftOver
+
+```{r}
+fiveprime_searchCols_hg38 <-
+  c(
+    "hg38_fiveprime_chr",
+    "hg38_fiveprime_searchStart_0based",
+    "hg38_fiveprime_searchEnd_0based",
+    "fusion_id"
+  )
+
+fiveprime_geneCols_hg38 <-
+  c(
+    "hg38_fiveprime_chr",
+    "hg38_fiveprime_gene_gtfStart_0based",
+    "hg38_fiveprime_gene_gtfEnd_0based",
+    "fusion_id"
+  )
+
+# Write chrom, chromStart, chromEnd, & name (fusion_id) to bed files with no headers, no row numbers, and no cells in quotes
+# write.table(
+#   fiveprime_search_hg38[, fiveprime_searchCols_hg38],
+#   file = '~/fusions/06_ValidationPipeline/liftoverBEDs/hg38_fiveprime_searchRanges.bed',
+#   sep = "\t",
+#   row.names = FALSE,
+#   col.names = FALSE,
+#   quote = FALSE
+# )
+# 
+# write.table(
+#   fiveprime_search_hg38[, fiveprime_geneCols_hg38],
+#   file = '~/fusions/06_ValidationPipeline/liftoverBEDs/hg38_fiveprime_geneRanges.bed',
+#   sep = "\t",
+#   row.names = FALSE,
+#   col.names = FALSE,
+#   quote = FALSE
+# )
+
+# Go to https://genome.ucsc.edu/cgi-bin/hgLiftOver, lift from hg38 to hg19 and keep default settings
+# Submit the hg38_fiveprime_searchRanges.bed & hg38_fiveprime_geneRanges.bed files
+
+# Results, searchRanges: successfully converted 33630/33855 records (right click "view conversions", download linked file as hg19_fiveprime_searchRanges.bed in liftoverBEDs)
+# Results, geneRanges: successfully converted 33575/33855 records (right click "view conversions", download linked file as hg19_fiveprime_geneRanges.bed in liftoverBEDs)
+```
+
+## 3' prepare to lift & lift to hg19 with UCSC LiftOver
+
+```{r}
+threeprime_searchCols_hg38 <-
+  c(
+    "hg38_threeprime_chr",
+    "hg38_threeprime_searchStart_0based",
+    "hg38_threeprime_searchEnd_0based",
+    "fusion_id"
+  )
+
+threeprime_geneCols_hg38 <-
+  c(
+    "hg38_threeprime_chr",
+    "hg38_threeprime_gene_gtfStart_0based",
+    "hg38_threeprime_gene_gtfEnd_0based",
+    "fusion_id"
+  )
+
+# Write chrom, chromStart, chromEnd, & name (fusion_id) to bed files with no headers, no row numbers, and no cells in quotes
+# write.table(
+#   threeprime_search_hg38[, threeprime_searchCols_hg38],
+#   file = "~/fusions/06_ValidationPipeline/liftoverBEDs/hg38_threeprime_searchRanges.bed",
+#   sep = "\t",
+#   row.names = FALSE,
+#   col.names = FALSE,
+#   quote = FALSE
+# )
+# 
+# write.table(
+#   threeprime_search_hg38[, threeprime_geneCols_hg38],
+#   file = "~/fusions/06_ValidationPipeline/liftoverBEDs/hg38_threeprime_geneRanges.bed",
+#   sep = "\t",
+#   row.names = FALSE,
+#   col.names = FALSE,
+#   quote = FALSE
+# )
+
+# Go to https://genome.ucsc.edu/cgi-bin/hgLiftOver, lift from hg38 to hg19 and keep default settings
+# Submit the hg38_threeprime_searchRanges.bed & hg38_threeprime_geneRanges.bed files
+
+# Results, searchRanges: successfully converted 33388/33855 records (right click "view conversions", download linked file as hg19_threeprime_searchRanges.bed in liftoverBEDs)
+# Results, geneRanges: successfully converted 33317/33855 records (right click "view conversions", download linked file as hg19_threeprime_geneRanges.bed in liftoverBEDs)
+```
+
+# Load liftover files & work with them
+
+## 5' partner lifted coordinates
+
+```{r}
+fiveprime_searchCoords_hg19 <-
+  read.csv(
+    "~/fusions/06_ValidationPipeline/liftoverBEDs/hg19_fiveprime_searchRanges.bed",
+    header = FALSE,
+    sep = "\t"
+  ) %>% # 33630 rows as expected from LiftOver
+  mutate(
+    V2 = V2 + 1, # output is 0-based, switch back to 1-based
+    V3 = V3
+  ) %>%
+  # Rename cols
+  rename(
+    hg19_fiveprime_chr = "V1",
+    hg19_fiveprime_searchStart = "V2",
+    hg19_fiveprime_searchEnd = "V3",
+    fusion_id = "V4"
+  )
+
+fiveprime_geneCoords_hg19 <-
+  read.csv(
+    "~/fusions/06_ValidationPipeline/liftoverBEDs/hg19_fiveprime_geneRanges.bed",
+    header = FALSE,
+    sep = "\t"
+  ) %>% # 33575 rows as expected from LiftOver
+  mutate(
+    V2 = V2 + 1, # output is 0-based, switch back to 1-based
+    V3 = V3
+  ) %>%
+  # Rename cols
+  rename(
+    hg19_fiveprime_gene_chr = "V1",
+    hg19_fiveprime_geneStart = "V2",
+    hg19_fiveprime_geneEnd = "V3",
+    fusion_id = "V4"
+  )
+
+fiveprime_coordsSanity_hg19 <-
+  fiveprime_searchCoords_hg19 %>% # 33630 rows
+  full_join(fiveprime_geneCoords_hg19) %>% # increase to 33635 rows
+  na.omit() %>% # drops to 33570 rows because of discrepancies in what was lifted for search ranges and gene ranges
+  filter(hg19_fiveprime_chr == hg19_fiveprime_gene_chr) %>% # sanity check passed! Still 33570 rows
+  select(-hg19_fiveprime_gene_chr) %>% # don't need this chr which we pulled from the geneRange lift now that it passes sanity check
+  left_join(
+    fiveprime_search_hg38 %>% select(
+      fusion_id,
+      fiveprime_transcribed_strand,
+      hg38_fiveprime_searchStart,
+      hg38_fiveprime_searchEnd
+    )
+  ) %>% # join with the original df to get the strand! Pull the original search regions too to have in the larger df
+
+  # Assign the hg19 fusion junction coordinate based on the search strands
+  mutate(
+    hg19_fiveprime_fusion_junction = case_when(
+      (fiveprime_transcribed_strand == "+") ~ hg19_fiveprime_searchStart,
+      (fiveprime_transcribed_strand == "-") ~ hg19_fiveprime_searchEnd
+    )
+  ) %>%
+  filter(
+    hg19_fiveprime_geneStart <= hg19_fiveprime_fusion_junction &
+      hg19_fiveprime_fusion_junction <= hg19_fiveprime_geneEnd
+  ) %>% # sanity check after lifting, all passed! Lifted fusion junctions exist within bounds of lifted gene coordinates
+  filter(
+    hg19_fiveprime_searchStart <= hg19_fiveprime_searchEnd &
+      hg19_fiveprime_geneStart < hg19_fiveprime_geneEnd
+  ) %>% # sanity check after lifting, all passed!
+  relocate(
+    fusion_id,
+    hg19_fiveprime_chr,
+    fiveprime_transcribed_strand,
+    hg19_fiveprime_geneStart,
+    hg19_fiveprime_fusion_junction,
+    hg19_fiveprime_geneEnd,
+    hg19_fiveprime_searchStart,
+    hg19_fiveprime_searchEnd,
+    hg38_fiveprime_searchStart,
+    .before = hg38_fiveprime_searchEnd
+  )
+```
+
+*5' partners* = 33,570 rows
+
+## 3' partner lifted coordinates
+
+```{r}
+threeprime_searchCoords_hg19 <-
+  read.csv(
+    "~/fusions/06_ValidationPipeline/liftoverBEDs/hg19_threeprime_searchRanges.bed",
+    header = FALSE,
+    sep = "\t"
+  ) %>% # 33388 rows as expected from LiftOver
+  mutate(
+    V2 = V2 + 1, # output is 0-based, switch back to 1-based
+    V3 = V3
+  ) %>%
+  # Rename cols
+  rename(
+    hg19_threeprime_chr = "V1",
+    hg19_threeprime_searchStart = "V2",
+    hg19_threeprime_searchEnd = "V3",
+    fusion_id = "V4"
+  )
+
+threeprime_geneCoords_hg19 <-
+  read.csv(
+    "~/fusions/06_ValidationPipeline/liftoverBEDs/hg19_threeprime_geneRanges.bed",
+    header = FALSE,
+    sep = "\t"
+  ) %>% # 33317 rows as expected from LiftOver
+  mutate(
+    V2 = V2 + 1, # output is 0-based, switch back to 1-based
+    V3 = V3
+  ) %>%
+  # Rename cols
+  rename(
+    hg19_threeprime_gene_chr = "V1",
+    hg19_threeprime_geneStart = "V2",
+    hg19_threeprime_geneEnd = "V3",
+    fusion_id = "V4"
+  )
+
+threeprime_coordsSanity_hg19 <-
+  threeprime_searchCoords_hg19 %>% # 33388 rows
+  full_join(threeprime_geneCoords_hg19) %>% # increase to 33419 rows
+  na.omit() %>% # drops to 33286 rows because of discrepancies in what was lifted for search ranges and gene ranges
+  filter(hg19_threeprime_chr == hg19_threeprime_gene_chr) %>% # sanity check passed! Still 33286 rows
+  select(-hg19_threeprime_gene_chr) %>% # don't need this chr which we pulled from the geneRange lift now that it passes sanity check
+  left_join(
+    threeprime_search_hg38 %>% select(
+      fusion_id,
+      threeprime_transcribed_strand,
+      hg38_threeprime_searchStart,
+      hg38_threeprime_searchEnd
+    )
+  ) %>% # join with the original df to get the strand! Pull the original search regions too to have in the larger df
+
+  # Assign the hg19 fusion junction coordinate based on the search strands
+  mutate(
+    hg19_threeprime_fusion_junction = case_when(
+      (threeprime_transcribed_strand == "+") ~ hg19_threeprime_searchEnd,
+      (threeprime_transcribed_strand == "-") ~ hg19_threeprime_searchStart
+    )
+  ) %>%
+  filter(
+    hg19_threeprime_geneStart <= hg19_threeprime_fusion_junction &
+      hg19_threeprime_fusion_junction <= hg19_threeprime_geneEnd
+  ) %>% # sanity check after lifting, all passed! Lifted fusion junctions exist within bounds of lifted gene coordinates
+  filter(
+    hg19_threeprime_searchStart <= hg19_threeprime_searchEnd &
+      hg19_threeprime_geneStart < hg19_threeprime_geneEnd
+  ) %>% # sanity check after lifting, all passed!
+  relocate(
+    fusion_id,
+    hg19_threeprime_chr,
+    threeprime_transcribed_strand,
+    hg19_threeprime_geneStart,
+    hg19_threeprime_fusion_junction,
+    hg19_threeprime_geneEnd,
+    hg19_threeprime_searchStart,
+    hg19_threeprime_searchEnd,
+    hg38_threeprime_searchStart,
+    .before = hg38_threeprime_searchEnd
+  )
+```
+
+*3' partners* = 33,286 rows
+
+
+## hg19 coordinates for fusions (5' partners and 3' partners)
+
+```{r}
+bothPartner_searchCoords_hg19 <-
+  fiveprime_coordsSanity_hg19 %>% # 33570 lifted 5' partners
+  full_join(threeprime_coordsSanity_hg19) %>% # 33284 are joining with lifted 3' partners
+  na.omit() # 33032 total fusions where both partner lifted!
+```
+
+Kept 33032/33855 fusions total! Lost 823 fusions in the lifting process
+
+# Create a pipeline input style df to serve as a reference dataframe with lifted coordinates and all cols
+
+```{r}
+pipeline_input_allCols <-
+  bothPartner_searchCoords_hg19 %>% # 33032 rows & 19 cols
+  left_join(all_fusion_data_filtered) %>% # 33032 rows & 87 cols (original all_fusion_data_filtered was 71 cols with 3 cols used to join with bothPartner_searchCoords_hg19)
+  relocate(fiveprime_transcribed_strand, .after = fiveprime_gene_strand) %>%
+  relocate(hg19_fiveprime_chr, .after = hg38_fiveprime_chr) %>%
+  relocate(hg19_fiveprime_geneStart, .after = hg38_fiveprime_gene_gtfStart) %>%
+  relocate(hg19_fiveprime_fusion_junction, .after = hg38_fiveprime_fusion_junction) %>%
+  relocate(hg19_fiveprime_geneEnd, .after = hg38_fiveprime_gene_gtfEnd) %>%
+  relocate(
+    hg38_fiveprime_searchStart,
+    hg19_fiveprime_searchStart,
+    hg38_fiveprime_searchEnd,
+    hg19_fiveprime_searchEnd,
+    .after = hg38_fiveprime_gene_gtfEnd
+  ) %>%
+  relocate(threeprime_transcribed_strand, .after = threeprime_gene_strand) %>%
+  relocate(hg19_threeprime_chr, .after = hg38_threeprime_chr) %>%
+  relocate(hg19_threeprime_geneStart, .after = hg38_threeprime_gene_gtfStart) %>%
+  relocate(hg19_threeprime_fusion_junction, .after = hg38_threeprime_fusion_junction) %>%
+  relocate(hg19_threeprime_geneEnd, .after = hg38_threeprime_gene_gtfEnd) %>%
+  relocate(
+    hg38_threeprime_searchStart,
+    hg19_threeprime_searchStart,
+    hg38_threeprime_searchEnd,
+    hg19_threeprime_searchEnd,
+    .after = hg38_threeprime_gene_gtfEnd
+  ) %>%
+  mutate(
+    path = paste(
+      "/home/arianna2/lu2024-12-40/arianna/fusions/Data/WGS/AlignedBAMs/",
+      wgs_run_accession,
+      "_aligned.bam",
+      sep = ""
+    )
+  ) # add the path to the associated WGS bam as it would appear on server
+```
+
+*Arriba* & *STAR-Fusion* combined 33032 fusion transcript predictions'
+*Arriba fusions* = 27,258 predictions
+*STAR-Fusion fusions* = 5774 predictions
+
+## Pull just the columns needed for the pipeline & output as a tsv file
+
+```{r}
+pipeline_input <- pipeline_input_allCols %>%
+  select(
+    fusion_id,
+    sampleID,
+    program,
+    path,
+    hg19_fiveprime_chr,
+    fiveprime_transcribed_strand,
+    hg19_fiveprime_searchStart,
+    hg19_fiveprime_searchEnd,
+    hg19_threeprime_chr,
+    threeprime_transcribed_strand,
+    hg19_threeprime_searchStart,
+    hg19_threeprime_searchEnd
+  ) %>%
+  rename(
+    sample_id = "sampleID",
+    fiveprime_chr = "hg19_fiveprime_chr",
+    fiveprime_strand = "fiveprime_transcribed_strand",
+    fiveprime_search_start = "hg19_fiveprime_searchStart",
+    fiveprime_search_end = "hg19_fiveprime_searchEnd",
+    threeprime_chr = "hg19_threeprime_chr",
+    threeprime_strand = "threeprime_transcribed_strand",
+    threeprime_search_start = "hg19_threeprime_searchStart",
+    threeprime_search_end = "hg19_threeprime_searchEnd"
+  ) %>%
+  # Only select what is needed for pipeline
+  select(
+    fusion_id,
+    sample_id,
+    path,
+    fiveprime_chr,
+    fiveprime_strand,
+    fiveprime_search_start,
+    fiveprime_search_end,
+    threeprime_chr,
+    threeprime_strand,
+    threeprime_search_start,
+    threeprime_search_end
+  )
+
+# file_path <- "~/fusions/06_ValidationPipeline/pipelineInput.tsv"
+# 
+# write.table(
+#   pipeline_input,
+#   file = file_path,
+#   sep = "\t",
+#   row.names = FALSE,
+#   col.names = TRUE,
+#   quote = FALSE
+# )
+```
+
+# Save workspace
+
+```{r}
+# save.image("pipelineInput.RData")
+```

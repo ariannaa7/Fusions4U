@@ -1,0 +1,300 @@
+---
+title: "Pulling coordinates for sam-dumping WGS BAMs"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Identifies 1-based coordinate ranges which need to be present in each cell line's WGS BAM"
+version: "1.0.0"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load image from previous script
+
+```{r}
+load("~/fusions/Scripts/05_PreliminaryAnalysis_scripts/preAnalysis.RData")
+```
+
+## Load packages
+
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0
+```
+
+## Load files
+
+### Load gencode genome annotation file
+
+```{r}
+gencode_v44_genes <- gencode_v44_genes # already loaded in preAnalysis script
+```
+
+### Load the hg19 chrom alias file
+
+```{r}
+chromAliasFile_hg19 <-
+  read.csv(
+    "~/fusions/Data/ReferenceGenome/hg19.p13.plusMT.chromAlias.txt",
+    sep = "\t",
+    header = TRUE
+  ) %>%
+  dplyr::rename(ucsc = "X..ucsc")
+```
+
+# Pull the genes and their coordinates (+2kb buffer/flank in both directions)
+
+## Create isolated dataframes for 5' gene and 3' genes
+
+```{r}
+fiveprime_geneIDs_chr <-
+  all_fusion_data_filtered %>% # pull info just 5' gene
+  select(
+    rna_run_accession,
+    wgs_run_accession,
+    fiveprime_geneID,
+    fiveprime_gene_name,
+    hg38_fiveprime_chr,
+    hg38_fiveprime_gene_gtfStart,
+    hg38_fiveprime_gene_gtfEnd
+  ) %>%
+  # Rename for nice row bind!
+  dplyr::rename(
+    gene_id = "fiveprime_geneID",
+    gene_name = "fiveprime_gene_name",
+    seqnames = "hg38_fiveprime_chr",
+    start = "hg38_fiveprime_gene_gtfStart",
+    end = "hg38_fiveprime_gene_gtfEnd"
+  )
+
+threeprime_geneIDs_chr <-
+  all_fusion_data_filtered %>% # pull info just 3' gene
+  select(
+    rna_run_accession,
+    wgs_run_accession,
+    threeprime_geneID,
+    threeprime_gene_name,
+    hg38_threeprime_chr,
+    hg38_threeprime_gene_gtfStart,
+    hg38_threeprime_gene_gtfEnd
+  ) %>%
+  dplyr::rename(
+    gene_id = "threeprime_geneID",
+    gene_name = "threeprime_gene_name",
+    seqnames = "hg38_threeprime_chr",
+    start = "hg38_threeprime_gene_gtfStart",
+    end = "hg38_threeprime_gene_gtfEnd"
+  )
+```
+
+## Combine 5' and 3' genes back into one long dataframe
+
+```{r}
+all_genes <-
+  bind_rows(fiveprime_geneIDs_chr, threeprime_geneIDs_chr) %>% # combine into one long dataframe, 67710 entries
+  distinct() # just pull distinct rows. Drops to 35937 entries so there were many of the same genes across cell lines & fusion partners
+```
+
+## Join the genes present in fusions with the gtf
+
+```{r}
+genes_and_coordinates_df <- all_genes %>%
+  # Add a buffer in both directions
+  mutate(
+    start_w2kbuffer = start - 2000,
+    end_w2kbuffer = end + 2000
+  ) %>%
+  select(-start, -end) # don't need the non-buffered coords
+```
+
+## LiftOver from hg38 to hg19 - use web version! Converting to GRanges and lifting over with chain file yielded WAY to many positions (120448)
+
+### Create a df with 0-based coords, export it as a bed file, use UCSC LiftOver to lift
+
+```{r}
+genes_and_coordinates_hg38 <- genes_and_coordinates_df %>%
+  unite("name",
+    rna_run_accession:end_w2kbuffer,
+    sep = "=", # just picked a random character separator, also no other equals in df
+    remove = FALSE
+  ) %>%
+  mutate(
+    "start_w2kbuffer_0based" = start_w2kbuffer - 1, # 0-BASED
+    "end_w2kbuffer_0based" = end_w2kbuffer # 0-based, no change to end coordinate
+  )
+
+genes_and_coords_BEDcols <-
+  c(
+    "seqnames",
+    "start_w2kbuffer_0based",
+    "end_w2kbuffer_0based",
+    "name"
+  )
+    
+# Write chrom, chromStart, chromEnd, & name to bed files with no headers, no row numbers, and no cells in quotes
+# write.table(
+#   genes_and_coordinates_hg38[, genes_and_coords_BEDcols],
+#   file = "~/fusions/Data/WGS/hg38_prelift_FusionGeneCoordinates.bed",
+#   sep = "\t",
+#   row.names = FALSE,
+#   col.names = FALSE,
+#   quote = FALSE
+# )
+    
+# Go to https://genome.ucsc.edu/cgi-bin/hgLiftOver, lift from hg38 to hg19 and keep default settings
+# Submit the hg38_prelift_FusionGeneCoordinates.bed file
+# Results: successfully converted 35499/35937 records (right click "view conversions", download linked file as hg19_postlift_FusionGeneCoordinates.bed in WGS)
+```
+
+### Read in the 0-based lifted bed from UCSC (now in hg19)
+
+```{r}
+hg19FusionGeneCoords <-
+  read.csv(
+    "~/fusions/Data/WGS/hg19_postlift_FusionGeneCoordinates.bed",
+    header = FALSE,
+    sep = "\t"
+  ) %>%
+  # Output is 0-based, switch back to 1-based
+  mutate(
+    V2 = V2 + 1,
+    V3 = V3
+  ) %>%
+  # Rename cols for clarity
+  dplyr::rename(
+    hg19_chr = "V1",
+    hg19_start = "V2",
+    hg19_end = "V3",
+    name = "V4" # rename for easy matching
+  ) 
+    
+genes_and_coordinates_hg19 <- genes_and_coordinates_hg38 %>%
+  left_join(hg19FusionGeneCoords, by = "name") %>% # matches to the "name" column we created prelift
+  na.omit() %>% # 35499 as expected (hg19FusionGeneCoords df count)
+  filter(hg19_start < hg19_end) %>% # quick sanity check, all pass!
+  select(
+    rna_run_accession,
+    wgs_run_accession,
+    gene_id,
+    gene_name,
+    hg19_chr,
+    hg19_start,
+    hg19_end
+  ) %>%
+  dplyr::rename(
+    hg19_start_w2kbuffer = "hg19_start",
+    hg19_end_w2kbuffer = "hg19_end"
+  )
+    
+# After running the pipeline, one search region sprung error messages ("chrUn_gl000237:815-835") because it couldn't find the region in the specified BAMs
+# Upon further investigation, the region chr22:11066418-11068174 (1-based) lifts to chrUn_gl000237:814-2570 (1-based), but adding the 2kb buffer to the hg38 version made it an unsuccessful lift to hg19.
+# Since this was the only region that couldn't be located when running the pipeline, we will just manually add the region to the genes_and_coordinates_hg19 dataframe without changing the logic of adding a 2kb buffer and then lifting
+
+manual_addition_hg19GeneCoords <- all_genes %>%
+  filter(gene_id == "ENSG00000279973.2") %>%
+  select(rna_run_accession, wgs_run_accession, gene_id, gene_name) %>%
+  mutate(
+    hg19_chr = "chrUn_gl000237",
+    hg19_start = 814, # 1-based coordinate
+    hg19_end = 2570
+  ) %>%
+  mutate(
+    hg19_start_w2kbuffer = hg19_start - 813, # still call it 2k buffer for accurate rowbind, but know that subtracting 2k would give us a "negative" postion
+    hg19_end_w2kbuffer = hg19_end + 2000
+  ) %>%
+  select(
+    rna_run_accession,
+    wgs_run_accession,
+    gene_id,
+    gene_name,
+    hg19_chr,
+    hg19_start_w2kbuffer,
+    hg19_end_w2kbuffer
+  )
+
+genes_and_coordinates_hg19 <-
+  genes_and_coordinates_hg19 %>% # 35499 rows
+  bind_rows(manual_addition_hg19GeneCoords) # now 35525 rows!
+```
+
+### Update the naming convention to match what is present in the pre-existing CCLE BAMs
+
+```{r}
+chromAlias_hg19 <- chromAliasFile_hg19 %>%
+  mutate(nameInNCBI_SAM = case_when(
+    (!str_detect(ucsc, "_")) ~ assembly, # chromosomes follow assembly naming in the alignment file on ncbi
+    (str_detect(ucsc, "_")) ~ genbank # isolate unplaced scaffolds, those follow genbank naming in the alignment file on ncbi
+  )) %>%
+  filter(nameInNCBI_SAM != "") %>% # remove the chrM line that has no associated name
+  select(ucsc, nameInNCBI_SAM)
+
+# Save the new chrom Alias file to ReferenceGenome directory too
+# file_path <- "~/fusions/Data/ReferenceGenome/hg19.p13.plusMT.chromAlias_forSAMDump.txt"
+# write.table(
+#   chromAlias_hg19,
+#   file = file_path,
+#   sep = "\t",
+#   row.names = FALSE,
+#   col.names = FALSE,
+#   quote = FALSE
+# ) # no headers, don't add row numbers, don't put cells in quotes
+
+genes_and_coordinates_hg19_updatedNaming <-
+  genes_and_coordinates_hg19 %>%
+  left_join(chromAlias_hg19, by = c("hg19_chr" = "ucsc")) %>%
+  dplyr::rename(
+    hg19_ucsc_chr = "hg19_chr",
+    hg19_NCBI_SAM_chr = "nameInNCBI_SAM"
+  ) %>%
+  relocate("hg19_NCBI_SAM_chr", .after = "hg19_ucsc_chr")
+```
+
+# Output the 1-based hg19 regions with updated naming conventions into files for each cell line 
+
+```{r}
+# Output geneID & coordinates (+2kb buffer) into files named for the WGS accession
+  
+# Directory to save the files
+output_dir <- "~/fusions/Data/WGS/FusionGeneCoordinates/"
+
+# Generate the files
+# for (unique_cellLine in unique(genes_and_coordinates_hg19_updatedNaming$wgs_run_accession)) {
+#   temp_df <- genes_and_coordinates_hg19_updatedNaming %>%
+#     filter(wgs_run_accession == unique_cellLine) %>% # loop over one cell line at a time, use WGS run accession to identify the cell lines
+# 
+#     # Pull just these columns
+#     select(
+#       hg19_NCBI_SAM_chr,
+#       hg19_start_w2kbuffer,
+#       hg19_end_w2kbuffer
+#     ) %>%
+#     unite("tempCol", hg19_NCBI_SAM_chr, hg19_start_w2kbuffer, sep = ":") %>% # chromosome & start need to be separated with ":"
+#     unite("sam-dump_coordinate_format",
+#       tempCol,
+#       hg19_end_w2kbuffer,
+#       sep = "-"
+#     ) # start & end need to be separated with "-"
+# 
+#   file_path <-
+#     paste0(output_dir, unique_cellLine, "_geneCoords.tsv") # name the file using its wgs run accession
+# 
+#   write.table(
+#     temp_df,
+#     file = file_path,
+#     sep = "\t",
+#     row.names = FALSE, # don't add row numbers
+#     col.names = FALSE, # no headers,
+#     quote = FALSE # don't put cells in quotes
+#   )
+# }
+```
+
+# Save workspace
+
+```{r}
+# save.image("getCoordinates.RData")
+```
