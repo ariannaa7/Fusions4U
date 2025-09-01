@@ -1,0 +1,464 @@
+---
+title: "Annotating validated fusions - prep"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Preparations for further annotation of validated fusion. Namely: (1) annotating for alternative splicing and identical predictions, (2) preparing sense-transcribed dfs for further annotation"
+version: "1.0.0"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load image from previous script
+
+```{r}
+load("~/fusions/Scripts/06_ValidationPipeline_scripts/postAnalysis.RData")
+```
+
+## Load packages
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0
+
+suppressPackageStartupMessages(library(rtracklayer, quietly = TRUE, warn.conflicts = FALSE)) # v1.62.0
+
+suppressPackageStartupMessages(library(readxl, quietly = TRUE, warn.conflicts = FALSE)) # v1.4.5
+```
+
+# Load GENCODE v44 gff3 which will be used for multiple types of annotations
+```{r}
+# Download comprehensive gene gencode.v44.annotation.gff3 from https://www.gencodegenes.org/human/release_44.html. Store within the ReferenceGenome file
+# Download gff3 instead of using gtf_genes_df! Has all the same gene entries, but the gff3 format will lend to easier joining with miRBase gff3
+gencode_v44_gff3 <-
+  import("~/fusions/Data/ReferenceGenome/gencode.v44.annotation.gff3") 
+```
+
+# Alternative splicing
+
+## Identify Arriba & STAR-Fusion gene fusions that are predicted >1 in the same sample by the same program but with different junctions
+```{r}
+# Identify alternative splicing in the dataset with all predictions AND in the dataset with only validations. This will be important when doing stats and wanting to compare.
+# Can't just annotate for "all" and then subset val_only because it is possible that it doesn't appear alt-spliced in the validated set since maybe none of its partners were validated
+
+alt_splicing <- function(predictions_df, status, program_name) {
+  if (tolower(status) == "all") {
+    df <- predictions_df # keep all predictions
+  } else if (tolower(status) == "val_only") {
+    df <- predictions_df %>%
+      filter(discordant_read_support == "TRUE") # only pull validated. Don't need to filter by program name here
+  }
+
+  df <- df %>%
+    filter(program == tolower(program_name)) %>% # filter by program name
+    group_by(sampleID, tissueType, geneID_fusionName) %>% # group
+    filter(n() > 1) %>% # and pull those groups that appear more than once
+    ungroup()
+
+  return(df)
+}
+
+alt_splicing_arriba_all <-
+  alt_splicing(all_fusion_data_filtered_valStatus, "all", "arriba") # 13143
+
+alt_splicing_arriba_valOnly <-
+  alt_splicing(all_fusion_data_filtered_valStatus, "val_only", "arriba") # 5202
+
+alt_splicing_sf_all <-
+  alt_splicing(all_fusion_data_filtered_valStatus, "all", "star-fusion") # 1557
+
+alt_splicing_sf_valOnly <-
+  alt_splicing(all_fusion_data_filtered_valStatus, "val_only", "star-fusion") # 741
+```
+
+## Identify the unique fusions that appear >1 in the same sample by the same program
+```{r}
+alt_splicing_unique <- function(alt_arriba, alt_sf) {
+  # Group by sampleID, tissueType, and geneID_fusionName to pull distincts for each program
+  distinct_function <- function(input_df) {
+    distinct <- input_df %>%
+      select(sampleID, tissueType, geneID_fusionName) %>%
+      distinct()
+
+    return(distinct)
+  }
+
+  alt_splicing_arriba_unique <- distinct_function(alt_arriba)
+
+  alt_splicing_sf_unique <- distinct_function(alt_sf)
+
+
+  # Then bind together so both programs in one df
+  bind_function <- function(distinct_arriba_df, distinct_sf_df) {
+    bound <- bind_rows(distinct_arriba_df, distinct_sf_df) %>%
+      distinct() %>%
+      mutate(altSplicing_id = row_number())
+
+    return(bound)
+  }
+
+  alt_bound <-
+    bind_function(alt_splicing_arriba_unique, alt_splicing_sf_unique)
+
+  return(alt_bound)
+}
+
+alt_splicing_unique_all <-
+  alt_splicing_unique(alt_splicing_arriba_all, alt_splicing_sf_all) # 4906
+
+alt_splicing_unique_valOnly <-
+  alt_splicing_unique(alt_splicing_arriba_valOnly, alt_splicing_sf_valOnly) # 1802
+
+```
+
+## Update the Arriba & STAR-Fusion fusions which appear more than once with their alternate splicing ID
+```{r}
+alt_splicing_update <- function(alt_splicing_program_df, alt_splicing_unique_df) {
+  df <- alt_splicing_program_df %>%
+    left_join(alt_splicing_unique_df) %>%
+    # Sanity check that all junction combos are different
+    group_by(altSplicing_id) %>%
+    mutate(junc_combo = paste(hg38_fiveprime_fusion_junction, hg38_threeprime_fusion_junction, sep = "_")) %>%
+    group_by(altSplicing_id, junc_combo) %>%
+    filter(n() == 1) %>% # should have only one instance of each ID junc combo!
+    ungroup() %>%
+    select(-junc_combo)
+
+  return(df)
+}
+
+alt_splicing_arriba_all <-
+  alt_splicing_update(alt_splicing_arriba_all, alt_splicing_unique_all) # 13143
+
+alt_splicing_arriba_valOnly <-
+  alt_splicing_update(alt_splicing_arriba_valOnly, alt_splicing_unique_valOnly) # 5202
+
+alt_splicing_sf_all <-
+  alt_splicing_update(alt_splicing_sf_all, alt_splicing_unique_all) # 1557
+
+alt_splicing_sf_valOnly <-
+  alt_splicing_update(alt_splicing_sf_valOnly, alt_splicing_unique_valOnly) # 741
+
+
+alt_splicing_update_bind <- function(alt_splicing_arriba_df, alt_splicing_sf_df) {
+  df <- bind_rows(alt_splicing_arriba_df, alt_splicing_sf_df) %>%
+    select(fusion_id, altSplicing_id, sampleID, program, tissueType, geneID_fusionName)
+
+  return(df)
+}
+
+altSplicing_instances_all <-
+  alt_splicing_update_bind(alt_splicing_arriba_all, alt_splicing_sf_all) %>% # 14700
+  dplyr::rename(altSplicing_id_allPred = "altSplicing_id")
+
+altSplicing_instances_valOnly <-
+  alt_splicing_update_bind(alt_splicing_arriba_valOnly, alt_splicing_sf_valOnly) %>% # 5943
+  dplyr::rename(altSplicing_id_onlyVal = "altSplicing_id")
+```
+
+## Join with the larger df to identify instances of alt splicing
+```{r}
+all_fusion_data_filtered_valStatus <- all_fusion_data_filtered_valStatus %>%
+  left_join(altSplicing_instances_all) %>% # join with alt splicing df (alt splicing instances found amongst ALL predictions)
+  left_join(altSplicing_instances_valOnly) %>% # join with alt splicing df (alt splicing instances found amongst only validated)
+  
+  # Create a col to quickly identify if this fusion appears multiple times in the same sample by the same program (amongst ALL predictions)
+  mutate(multi_alt_fusion_allPred = case_when( 
+    (!(is.na(altSplicing_id_allPred))) ~ "TRUE",
+    TRUE ~ "FALSE" # if NA, then "FALSE"
+    )) %>%
+  
+  # Create a col to quickly identify if this fusion appears multiple times in the same sample by the same program (amongst only validated)
+  mutate(multi_alt_fusion_valOnly = case_when( 
+    (!(is.na(altSplicing_id_onlyVal))) ~ "TRUE",
+    TRUE ~ "FALSE" # if NA, then "FALSE"
+    )) %>%
+  
+  # Move the alt-splicing cols to follow fusion_id
+  relocate(multi_alt_fusion_allPred, altSplicing_id_allPred, multi_alt_fusion_valOnly, altSplicing_id_onlyVal, .after = fusion_id) 
+```
+
+# Annotate for "twin" status - fusions identically predicted in a cell line by the same program
+
+Validated fusions predicted by both Arriba & STAR-Fusion with the same junction coordinate (AND ALL OTHER ANNOTS SAME!)
+Just annotate all twins and then if you just want validated ones, filter for discordant read support!
+
+## Create a vector with cols to group by
+
+```{r}
+# Create a vector with partner specific columns, but exclude the Arriba and STAR-Fusion partner specific cols
+partner_cols <- colnames(
+  all_fusion_data_filtered_valStatus %>%
+    select(contains("prime")) %>%
+    select(!contains("arriba")) %>%
+    select(!contains("sf"))
+)
+```
+
+## Identify fusions predicted both by Arriba & STAR-Fusion (w/same junction)
+```{r}
+identify_twins <- all_fusion_data_filtered_valStatus %>%
+  # To be sure that the EXACT same fusion with the EXACT same junction appears in both Arriba & STAR-Fusion, all of the above categories should match
+  group_by(across(all_of(
+    c(
+      "discordant_read_support",
+      "breakpoint_support",
+      "fusion_name",
+      "geneID_fusionName",
+      "rna_run_accession",
+      "wgs_run_accession",
+      "sampleID",
+      "tissueType",
+      partner_cols
+    )
+  ))) %>%
+  filter(n_distinct(program) > 1) # 7228, pull instances that have matching cells based on the groups, but different programs
+```
+
+## Separate the identified fusions into Arriba & STAR-Fusion specific dfs
+```{r}
+twins_byProgram <- function(twin_df, program_name) {
+  df <-
+    twin_df %>% # will maintain the grouping established in identify_twins!
+    # Just select these cols
+    select(
+      program,
+      fusion_id,
+      sampleID,
+      tissueType,
+      geneID_fusionName,
+      hg38_fiveprime_fusion_junction,
+      hg38_threeprime_fusion_junction
+    ) %>%
+    filter(program == program_name) %>% # only pull for specified program
+    select(-program) # now drop program
+
+  # Rename fusion_id to be program specific
+  if (tolower(program_name) == "arriba") {
+    df <- df %>%
+      dplyr::rename(fusion_id_arriba = "fusion_id")
+  } else if (tolower(program_name) == "star-fusion") {
+    df <- df %>%
+      dplyr::rename(fusion_id_sf = "fusion_id")
+  }
+
+  return(df)
+}
+
+twins_arriba <- twins_byProgram(identify_twins, "arriba")
+
+twins_sf <- twins_byProgram(identify_twins, "star-fusion")
+```
+
+## Join the Arriba & STAR-Fusion dfs back together
+```{r}
+twins_together <- twins_arriba %>%
+  left_join(twins_sf) %>% # 3614 instead of 7228! Joined Arriba & STAR-Fusion so each fusion is on one line now!
+  relocate(fusion_id_arriba, fusion_id_sf, .before = discordant_read_support) %>%
+  ungroup() %>%
+  mutate(twinID = row_number()) %>% # add a unique id to identify that its been found in both programs
+  relocate(twinID, .before = fusion_id_arriba) %>%
+  filter(fusion_id_arriba != fusion_id_sf) # sanity check to make sure nothing funky happened with fusion_id, all pass!
+```
+
+## Merge the Arriba & STAR-Fusion specific cols together so each fusion is represented by one row
+```{r}
+twins_arriba_sf_info <- twins_together %>%
+  left_join(all_fusion_data_filtered_valStatus) %>%
+  select(
+    twinID,
+    reading_frame_arriba,
+    reading_frame_sf,
+    fiveprime_junctionSite_arriba,
+    threeprime_junctionSite_arriba,
+    fusionType_arriba,
+    fiveprime_split_reads_arriba,
+    threeprime_split_reads_arriba,
+    discordant_mates_arriba,
+    fiveprime_coverage_arriba,
+    threeprime_coverage_arriba,
+    confidence_arriba,
+    tags_arriba,
+    retained_protein_domains_PfamArriba_arriba,
+    retained_protein_domains_PfamUCSC_arriba,
+    fiveprime_transcript_id_arriba,
+    threeprime_transcript_id_arriba,
+    fiveprime_direction_arriba,
+    threeprime_direction_arriba,
+    filters_arriba,
+    fusion_transcript_arriba,
+    peptide_sequence_arriba,
+    read_identifiers_arriba,
+    annots_sf,
+    junctionReadCount_sf,
+    spanningFragCount_sf,
+    est_J_sf,
+    est_S_sf,
+    spliceType_sf,
+    largeAnchorSupport_sf,
+    ffpm_sf,
+    fiveprime_BreakDinuc_sf,
+    fiveprime_BreakEntropy_sf,
+    threeprime_BreakDinuc_sf,
+    threeprime_BreakEntropy_sf,
+    fiveprime_cds_ID_sf,
+    fiveprime_cds_range_sf,
+    threeprime_cds_ID_sf,
+    threeprime_cds_range_sf,
+    fusion_model_sf,
+    fusion_cds_sf,
+    fusion_transl_sf,
+    fiveprime_pfam_sf,
+    threeprime_pfam_sf
+  ) %>%
+  group_by(twinID) %>%
+  # every twinID appears exactly twice. For the other cols, if the cell is empty for one row of the twinID it is not empty for the other. Merge so all in one row and each twinID only appears once
+  summarize(across(everything(), ~ coalesce(.[1], .[2])), .groups = "drop") # take the first non-NA between the two cols
+```
+
+## Fix alt-splicing + twin situations
+```{r}
+alt_splicing_forTwins_allPred <- altSplicing_instances_all %>%
+  select(
+    altSplicing_id_allPred,
+    tissueType,
+    sampleID,
+    geneID_fusionName
+  ) %>% # doesn't matter what program! If it is a twin it is present in both programs. If altSplicing is true, then there is an instance of alt splicing in one or both programs. Sort by ID to determine. Too complicated to make another column identifying which program alt_splicing is present in
+  distinct() # 4906, to get rid of duplicates present after omitting program
+
+alt_splicing_forTwins_valOnly <- altSplicing_instances_valOnly %>%
+  select(
+    altSplicing_id_onlyVal,
+    tissueType,
+    sampleID,
+    geneID_fusionName
+  ) %>% # doesn't matter what program! If it is a twin it is present in both programs. If altSplicing is true, then there is an instance of alt splicing in one or both programs. Sort by ID to determine. Too complicated to make another column identifying which program alt_splicing is present in
+  distinct() # 1802, to get rid of duplicates present after omitting program
+
+twins <- twins_together %>%
+  left_join(twins_arriba_sf_info) %>%
+  left_join(alt_splicing_forTwins_allPred) %>%
+  # Create a col to match the one in the larger df. Ultimately so the rows where arriba/sf twins are displayed in one row also have an entry in this col
+  mutate(multi_alt_fusion_allPred = case_when(
+    (!(is.na(altSplicing_id_allPred))) ~ "TRUE",
+    TRUE ~ "FALSE"
+  )) %>% # if NA, then "FALSE"
+
+  left_join(alt_splicing_forTwins_valOnly) %>%
+  # Create a col to match the one in the larger df. Same as above
+  mutate(multi_alt_fusion_valOnly = case_when(
+    (!(is.na(altSplicing_id_onlyVal))) ~ "TRUE",
+    TRUE ~ "FALSE"
+  )) %>% # if NA, then "FALSE"
+
+  filter(reading_frame_arriba == reading_frame_sf) %>% # drops from 3614 to 2592! The last check to ensure TRUE twin predictions! Cannot do this by including in twins_arriba/twins_sf and then filtering in twins_together as it messes with twins_arriba_sf_info
+  mutate(program = "both") %>% # create col to match the one in the larger df
+  mutate(fusion_id = paste(fusion_id_arriba, fusion_id_sf, sep = "_")) %>% # create col to match the one in the larger df
+  mutate(twinID = row_number()) %>% # update the existing twinID since filtering for reading frame. Now we have 2592 IDs for 2592 twins
+  select(twinID, fusion_id_arriba, fusion_id_sf, any_of(colnames(all_fusion_data_filtered_valStatus))) # set the column order to the same as in the merged df! Just add twinID there
+# 2592 twins! 1596 of those were validated!!
+```
+
+## Create a mapping df with twin IDs
+```{r}
+fusions_thatHave_twin <- twins %>% # create this df as a way to filter dataframe! do we want to show df with twins in one row or sep
+  select(fusion_id, fusion_id_arriba, fusion_id_sf, twinID) %>% # pull the fusion ID cols
+  filter(fusion_id_arriba != fusion_id_sf) %>% # 2592, sanity check! There should be no duplicate IDs (and there aren't)
+  mutate( # because fusion_id is character type due to "_"
+    fusion_id_arriba = as.character(fusion_id_arriba),
+    fusion_id_sf = as.character(fusion_id_sf)
+  ) %>%
+  # Pivot longer so we combine Arriba & STAR-Fusion & Arriba_STAR-Fusion fusion_ids into one col
+  pivot_longer(
+    cols = c(fusion_id, fusion_id_arriba, fusion_id_sf),
+    names_to = "fusion_id_program",
+    values_to = "fusion_id"
+  ) %>%
+  select(fusion_id, twinID) # select the fusionID col and twinID col
+# each twin ID has three associate fusion IDs. fusion_id_arriba, fusion_id_sf, and fusion_id_arriba_sf
+```
+
+## Upate all_fusion_data_filtered_valStatus with twin annotation
+```{r}
+all_fusion_data_filtered_valStatus <- twins %>% # 2592
+  select(-fusion_id_arriba, -fusion_id_sf, -twinID) %>% # not needed now that we've pulled fusions_thatHave_twin
+  bind_rows(all_fusion_data_filtered_valStatus %>% mutate(fusion_id = as.character(fusion_id))) %>% # 35624! Because 2592 twins + 33032 from merged_val_annotated_df! (again update type to character!)
+  left_join(fusions_thatHave_twin) %>%
+  mutate(twin = case_when(
+    (!(is.na(twinID))) ~ "TRUE", # in the situation that there is a twin ID, means it is a twins
+    TRUE ~ "FALSE"
+  )) %>% # if NA, then "FALSE"
+  relocate(
+    twin,
+    twinID,
+    multi_alt_fusion_allPred,
+    altSplicing_id_allPred,
+    multi_alt_fusion_valOnly,
+    altSplicing_id_onlyVal,
+    .after = fusion_id
+  )
+```
+
+# Update larger df with cell line disease & stage information
+
+```{r}
+all_fusion_data_filtered_valStatus <-
+  all_fusion_data_filtered_valStatus %>%
+  left_join(cellLine_summary %>% select(sampleID, disease, disease_stage)) %>%
+  relocate(disease, disease_stage, .after = tissueType)
+```
+
+# Create dataframes for validated 5' and 3' (and all together) partners to annotate features within their fusion transcripts
+
+## 5' partners of validated fusions, sense-transcribed
+```{r}
+validated_fusions_fiveprimePartners <- all_fusion_data_filtered_valStatus %>% # 35624 rows (twins appear 3x so actually 33032 fusions predicted)
+
+  filter(program != "both") %>% # drops to 33032. For now, show twins on separate lines!
+
+  filter(discordant_read_support == "TRUE") %>% # 10997 validated
+
+  # Remove columns pertaining to 3' partner
+  select(!contains("threeprime")) %>% # 10903
+  filter(fiveprime_transcriptionType == "sense") # just keep instances of sense transcription
+```
+
+*Sense-transcribed 5' partners* = 10903 validations
+
+## 3' partners of validated fusions, sense-transcribed
+```{r}
+validated_fusions_threeprimePartners <- all_fusion_data_filtered_valStatus %>% # 35624 rows (twins appear 3x so actually 33032 fusions predicted)
+
+  filter(program != "both") %>% # drops to 33032. For now, show twins on separate lines!
+
+  filter(discordant_read_support == "TRUE") %>% # 10997 validated
+
+  # Remove columns pertaining to 5' partner
+  select(!contains("fiveprime")) %>% # 9506
+  filter(threeprime_transcriptionType == "sense") # just keep instances of sense transcription
+```
+
+*Sense-transcribed 5' partners* = 9506 validations
+
+## Validated fusions, both partners - both sense transcribed
+```{r}
+validated_fusions_bothPartners <- all_fusion_data_filtered_valStatus %>% # 35624 rows (twins appear 3x so actually 33032 fusions predicted)
+
+  filter(program != "both") %>%
+  filter(discordant_read_support == "TRUE") %>% # 10997 validated
+
+  filter(fiveprime_transcriptionType == "sense" &
+    threeprime_transcriptionType == "sense") # 9413
+# mainly of use when we need both partners and both should be sense transcribed (mitelman for example)
+```
+
+*Both partners sense-transcribed* = 9413 validations
+
+# Save workspace
+
+```{r}
+# save.image("annotation_prep.RData")
+```

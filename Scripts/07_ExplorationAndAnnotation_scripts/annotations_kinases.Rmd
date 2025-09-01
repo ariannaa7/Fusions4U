@@ -1,0 +1,214 @@
+---
+title: "Annotating validated fusions - kinases"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Annotates validated fusions which involve kinases"
+version: "1.0.0"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load image from previous script
+
+```{r}
+load("~/fusions/Scripts/07_ExplorationAndAnnotation_scripts/annotations_miRNA.RData")
+```
+
+## Load packages
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0
+
+suppressPackageStartupMessages(library(rtracklayer, quietly = TRUE, warn.conflicts = FALSE)) # v1.62.0
+
+suppressPackageStartupMessages(library(readxl, quietly = TRUE, warn.conflicts = FALSE)) # v1.4.5
+```
+
+## Load files needed for annotations
+
+```{r}
+# Download table of human kinases from kinhub.org, accessed on Jan 17, 2025
+#humanKinases <- readHTMLTable("http://www.kinhub.org/kinases.html", header = TRUE, as.data.frame = TRUE, stringsAsFactors = FALSE)
+  
+#humanKinases_df <- humanKinases[[1]] %>% # pull the dataframe nested within the list
+  #rename(Name = "xName",
+         #Manning_name = "Manning Name\n        \n      ",
+         #HGNC_name = "HGNC Name\n        \n      ",
+         #Kinase_name = "Kinase Name")
+
+# Save the humanKinases_df as an actual tsv file so we have a true record of it from the day we accessed
+#write_delim(humanKinases_df, file = "~/fusions/Data/Kinases/kinHub_humanKinases_17Jan2025.tsv", delim = "\t")
+
+humanKinases_df <- read.csv("~/fusions/Data/Kinases/kinHub_humanKinases_17Jan2025.tsv", sep = "\t", header = TRUE)
+```
+
+# Kinase annotation
+
+## Update the humanKinases_df to remove duplicate entries
+```{r}
+humanKinases <- humanKinases_df %>%
+  
+  group_by(UniprotID) %>% # 536
+  
+  filter(!(n() > 1 & grepl("Domain2_", Manning_name))) %>% # 523! There were 28 rows that represented duplicates. For 26 of those rows, we filtered out the one of the pair that contained "Domain_" in the Manning name
+  
+  ungroup() # UniProt ID Q8IWB6 still appears twice under two different Manning_name/Name
+
+# Output a file with all the UniProt IDs in one column
+uniprot_id <- humanKinases$UniprotID # character vector
+
+#write(uniprot_id, file = "~/fusions/Data/Kinases/uniprot_ids.txt") # each is on a new line!
+```
+
+## Use the UniProt Retrieve/ID mapping web tool (https://www.uniprot.org/id-mapping) to go from UniProtKB AC/ID database to Ensembl genome annotation database then upload
+```{r}
+# Upload the tsv that was outputted - accessed Jan 17, 2025
+uniprot_to_ensembl <- read.csv("~/fusions/Data/Kinases/idmapping_2025_01_17.tsv", header = TRUE, sep = "\t") %>% # per mapping job page, 519 IDs mapped to 554 results. 3 IDs were not mapped (O43930, Q6IBK5, O15197)
+  
+  rename(uniprot = "From",
+         ensembl = "To")
+```
+
+## Join humanKinases from kinhub with the mapped ensembl IDs and then the gencode gff3
+```{r}
+humanKinases_complete_df <- humanKinases %>% # 523 entries as expected
+  
+  left_join(uniprot_to_ensembl, by = c("UniprotID" = "uniprot"), relationship = "many-to-many") %>% # 558
+  
+  # Join with GENCODE to try to fill in the Ensembl IDs we couldn't pull from UniProt mapping and for more certain joining when identifying kinase fusion partners
+  full_join(gencode_v44_gff_df %>% select(gene_name, gene_id, strand),
+            by = character()) %>% # 23924808
+  
+  filter(HGNC_name == gene_name | Manning_name == gene_name | Name == gene_name | ensembl == gene_id) %>% # 569 matches! We want to pull a match under any of these circumstances since we might be missing information and because gene_name could be either HGNC/Manning/EnsemblBase
+  
+  # Create additional columns with the ensembl gene name UP TO THE PERIOD
+  mutate(ensembl_base = sub("\\..*", "", ensembl), 
+         gene_id_base = sub("\\..*", "", gene_id)) %>%
+  
+  # Only maintain rows where the base ensembl IDs match, or if ensembl is NA (in the case of the 3 IDs that were not mapped)!
+  filter(ensembl_base == gene_id_base | is.na(ensembl)) %>% # 
+  # This keeps 523 rows as expected! Recall, humanKinases_df has 522 rows after removing duplicates
+  # 503 instances where kinase ensembl ID matches the genecode gff gene id exactly. 17 cases were the base (before the period) of the ensembl and gene_id column matches + gene_name matches the kinase name. AND the three cases where now ensembl ID could be matched to UniProt, but the kinase names match to gene_name in gencode gff
+  
+  select(-ensembl_base, -gene_id, -gene_id_base) %>% # not needed anymore
+  
+  filter(!(HGNC_name == "TEX14" & Manning_name != "SgK307")) %>% # Down to 522, UniProt ID: Q8IWB6, two instances with exact same kinases, except one goes by Manning name SgK307 and the other SgK424. SgK307 seems to be more widely recognized, so keep that instance
+  
+  rename(kinase_strand = "strand")
+```
+
+## Identify kinases that are involved in fusions
+
+### For 5' partners
+
+```{r}
+validated_fusions_fiveprimePartners_kinases <- validated_fusions_fiveprimePartners %>% # 10903
+  
+  # Join with kinases df, but ONLY on strand as we will filter on names/ID in next step
+  left_join(humanKinases_complete_df %>% select (-gene_name),
+            by = c("fiveprime_transcribed_strand" = "kinase_strand"),
+            relationship = "many-to-many") %>% # 2860082
+  
+  # Filter based on gene names & IDs
+  filter(fiveprime_gene_name == HGNC_name | fiveprime_gene_name == Manning_name | fiveprime_gene_name == Name | fiveprime_geneID == ensembl) %>% # 615 matches
+  
+  rename(fiveprime_kinase = "Name",
+         fiveprime_kinase_Manning_name = "Manning_name",
+         fiveprime_kinase_HGNC_name = "HGNC_name",
+         fiveprime_kinase_name = "Kinase_name",
+         fiveprime_kinase_group = "Group",
+         fiveprime_kinase_family = "Family",
+         fiveprime_kinase_subFamily = "SubFamily",
+         fiveprime_kinase_uniprotID = "UniprotID",
+         fiveprime_kinase_ensembl = "ensembl") %>%
+  
+  distinct() %>% # 615, they were all distinct
+  
+  # Add column to identify if the 5' partner is a kinase and fusion is in-frame
+  mutate(fiveprime_inFrame_kinase = case_when( 
+    (program == "arriba" & reading_frame_arriba == "in-frame" | program == "star-fusion" & reading_frame_sf == "in-frame") ~ "TRUE",
+    (program == "arriba" & reading_frame_arriba == "unknown" | program == "star-fusion" & reading_frame_sf == "unknown" ) ~ "FRAME_UNKNOWN",
+    TRUE ~ "FALSE" # takes care of NA scenarios (would be NA if row is for other program), "out-of-frame", and "stop-codon"
+  ))
+
+  # 151 instances of in-frame fusions for 5' partners
+  # 1 instances where ensembl IDs don't necessarily match geneIDs, but names match (STK17B) and ensembl IDs do match up to the period so we'll keep!
+```
+
+### For 3' partners
+```{r}
+validated_fusions_threeprimePartners_kinases <- validated_fusions_threeprimePartners %>% # 9506
+  
+  # Join with kinases df, but ONLY on strand as we will filter on names/ID in next step
+  left_join(humanKinases_complete_df %>% select(-gene_name),
+            by = c("threeprime_transcribed_strand" = "kinase_strand"), 
+            relationship = "many-to-many") %>% # 2860082
+  
+  # Filter based on gene names & IDs
+  filter(threeprime_gene_name == HGNC_name | threeprime_gene_name == Manning_name | threeprime_gene_name == Name | threeprime_geneID == ensembl) %>% # 416, caught instance where Manning is MYT1 but HGNC is PKMYT1 and they are on different strands! Here PKMYT1 is on - strand, but matched with fusion involving MYT1 which is on the + strand
+  
+  rename(threeprime_kinase = "Name",
+         threeprime_kinase_Manning_name = "Manning_name",
+         threeprime_kinase_HGNC_name = "HGNC_name",
+         threeprime_kinase_name = "Kinase_name",
+         threeprime_kinase_group = "Group",
+         threeprime_kinase_family = "Family",
+         threeprime_kinase_subFamily = "SubFamily",
+         threeprime_kinase_uniprotID = "UniprotID",
+         threeprime_kinase_ensembl = "ensembl") %>%
+  
+  distinct() %>% # 416, they were all distinct
+  
+  # Add column to identify if the 3' partner is a kinase and fusion is in-frame
+  mutate(threeprime_inFrame_kinase = case_when( 
+    (program == "arriba" & reading_frame_arriba == "in-frame" | program == "star-fusion" & reading_frame_sf == "in-frame") ~ "TRUE",
+    (program == "arriba" & reading_frame_arriba == "unknown" | program == "star-fusion" & reading_frame_sf == "unknown" ) ~ "FRAME_UNKNOWN",
+    TRUE ~ "FALSE" # takes care of NA scenarios (would be NA if row is for other program), "out-of-frame", and "stop-codon"
+  ))
+
+  # 119 instances of in-frame fusions for 3' partners
+  # 2 instances where ensembl IDs don't necessarily match geneIDs, but names match (ATM) and ensembl IDs do match up to the period so we'll keep!
+```
+
+## Join identified kinases fusion with the larger predictions df
+```{r}
+all_fusion_data_filtered_valStatus_kinases <- all_fusion_data_filtered_valStatus %>% # 35624 predictions (twins still appear with "both")
+  filter(program != "both") %>% # 33032
+  
+  # Join the kinase annotations to the larger df
+  left_join(validated_fusions_fiveprimePartners_kinases) %>%
+  left_join(validated_fusions_threeprimePartners_kinases) %>%
+  
+  # Remove these columns, not actually necessary as they match gene_name and/or ensembl ID anyways
+  select(-fiveprime_kinase, -fiveprime_kinase_Manning_name, -fiveprime_kinase_HGNC_name, -fiveprime_kinase_ensembl, 
+         -threeprime_kinase, -threeprime_kinase_Manning_name, -threeprime_kinase_HGNC_name, -threeprime_kinase_ensembl) %>%
+  
+  # Create columns to quickly identify if a partner is a kinase or not
+  mutate(fiveprime_kinase = case_when(
+    (!(is.na(fiveprime_inFrame_kinase))) ~ "TRUE", # as long as there is something in this column (TRUE or FALSE), then we know it is at least a kinase
+    (discordant_read_support == "TRUE" & is.na(fiveprime_inFrame_kinase)) ~ "FALSE", # validated, but not a kinase! Or it is validated and a kinase, but it is antisense transcribed
+    (discordant_read_support == "FALSE") ~ NA # if not validated, then it shouldn't have an annotation
+    )) %>%
+  
+  mutate(threeprime_kinase = case_when(
+    (!(is.na(threeprime_inFrame_kinase))) ~ "TRUE", # as long as there is something in this column (TRUE or FALSE), then we know it is at least a kinase
+    (discordant_read_support == "TRUE" & is.na(threeprime_inFrame_kinase)) ~ "FALSE", # validated, but not a kinase! Or it is validated and a kinase, but it is antisense transcribed
+    (discordant_read_support == "FALSE") ~ NA # if not validated, then it shouldn't have an annotation
+    )) %>%
+  
+  relocate(fiveprime_kinase, fiveprime_inFrame_kinase, .before = fiveprime_kinase_name) %>% # note: fiveprime_inFrame_kinase will be NA fiveprime_kinase == "FALSE" or is.na(fiveprime_kinase)
+  relocate(threeprime_kinase, threeprime_inFrame_kinase, .before = threeprime_kinase_name) # note: threeprime_inFrame_kinase will be NA threeprime_kinase == "FALSE" or is.na(threeprime_kinase)
+
+  # 23 instances where both 5' & 3' partners are kinases, 7 instances where both in-frame
+```
+# Save workspace
+
+```{r}
+save.image("annotations_kinases.RData")
+```
+
+

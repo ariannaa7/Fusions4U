@@ -1,0 +1,163 @@
+---
+title: "Creating a supplementary table with information per cell line"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Joining info per cell line with wgs depth & validation stats"
+version: "1.0.0"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load image from previous script
+
+```{r}
+load("~/fusions/Scripts/07_ExplorationAndAnnotation_scripts/annotations_post.RData")
+```
+
+## Load packages
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0
+```
+
+# Load cell line info
+```{r}
+cellLine_summary_subset <- cellLine_summary %>% # just a reminder that we already have this back from identifyCellLines
+  
+  # De-select these unnecessary cols
+  select(-c("tissue", "rna_load_date", "rna_release_date", "rna_run_hash", "rna_read_hash", "wgs_load_date", "wgs_release_date", "wgs_run_hash", "wgs_read_hash")) # already have tissueType
+```
+
+# Load mean depth per WGS cell line subset
+```{r}
+wgs_mean_depth <- read.csv("~/fusions/Data/WGS/meanDepth_perCellLine.tsv",  sep = "\t", header = FALSE) %>%
+  
+  # Rename the cols
+  rename(wgs_run_accession = "V1",
+         bam_size_bytes = "V2",
+         covered_bases = "V3",
+         bam_meanDepth = "V4") %>%
+  
+  # Convert bytes to gigabytes
+  mutate(bam_size_GB = round((bam_size_bytes/1073741824), digits = 2)) %>% 
+  
+  # Select relevant cols
+  select(wgs_run_accession, bam_size_GB, bam_meanDepth)
+```
+
+# Validation stats
+
+## Function to get cell line stats
+```{r}
+cellLine_val_stats_func <- function(predictions_df, program_name) {
+  
+  program_name <- tolower(program_name)
+  
+  if (program_name == "arriba") { # used to rename columns in last step
+    program_prefix <- "arriba"
+  }
+  
+  if (program_name == "star-fusion") { # used to rename columns in last step
+    program_prefix <- "sf"
+  }
+  
+ df <- predictions_df %>%
+   filter(program == program_name) %>%
+   group_by(sampleID) %>%
+   summarize(
+     predicted_count = n(), # discordant read support but no breakpoint support
+     validated_count = sum(discordant_read_support == "TRUE"), # discordant read support at least = validated
+     discordant_and_breakpointSupport_count = sum(discordant_read_support == "TRUE" & breakpoint_support == "TRUE"),
+     discordantSupportOnly_count = sum(discordant_read_support == "TRUE" & breakpoint_support == "FALSE"), # discordant read support but no breakpoint support
+     .groups = "drop"
+   ) %>%
+   
+   mutate(`validated/predicted_dec` = round((validated_count/predicted_count), digits = 2)) %>%
+   mutate(`discBreakSupport/validated_dec` = round((discordant_and_breakpointSupport_count/validated_count), digits = 2)) %>%
+   mutate(`discSupportOnly/validated_dec` = round((discordantSupportOnly_count/validated_count), digits = 2)) %>%
+   
+   group_by(sampleID) %>% 
+   summarize(
+     `validated/predicted_frac` = paste0(validated_count, "/", predicted_count),
+     `validated/predicted_dec` = `validated/predicted_dec`, # keep col through summarize
+     
+     `discBreakSupport/validated_frac` = paste0(discordant_and_breakpointSupport_count, "/", validated_count),
+     `discBreakSupport/validated_dec` = `discBreakSupport/validated_dec`, # keep col through summarize
+     
+     `discSupportOnly/validated_frac` = paste0(discordantSupportOnly_count, "/", validated_count),
+     `discSupportOnly/validated_dec` = `discSupportOnly/validated_dec`, # keep col through summarize
+     .groups = "drop"
+   ) %>%
+   
+   rename_with(~ paste0(., " (", program_prefix, ")"), .cols = !(starts_with("sampleID")))  # add the program name prefix to all columns except sampleID
+
+
+  return(df)
+  
+  }
+```
+
+## Run the function for Arriba
+```{r}
+arriba_cellLine_val_stats <- cellLine_val_stats_func(all_fusion_data_filtered_valStatus_annotated, "Arriba")
+```
+
+## Run the function for STAR-Fusion
+```{r}
+sf_cellLine_val_stats <- cellLine_val_stats_func(all_fusion_data_filtered_valStatus_annotated, "STAR-Fusion")
+```
+
+## Join & update val stats so Arriba & STAR-Fusion in one df
+```{r}
+cellLine_val_stats <- arriba_cellLine_val_stats %>%
+  left_join(sf_cellLine_val_stats) %>%
+  
+  mutate(`validated/predicted_dec (arriba)` = format(`validated/predicted_dec (arriba)`, nsmall = 2, trim = FALSE), # preserve the decimal points even for 1.00 and 0.00 & convert to character type
+         `discBreakSupport/validated_dec (arriba)` = format(`discBreakSupport/validated_dec (arriba)`, nsmall = 2, trim = FALSE),
+         `discSupportOnly/validated_dec (arriba)` = format(`discSupportOnly/validated_dec (arriba)`, nsmall = 2, trim = FALSE),
+         `validated/predicted_dec (sf)` = format(`validated/predicted_dec (sf)`, nsmall = 2, trim = FALSE),
+         `discBreakSupport/validated_dec (sf)` = format(`discBreakSupport/validated_dec (sf)`, nsmall = 2, trim = FALSE),
+         `discSupportOnly/validated_dec (sf)` = format(`discSupportOnly/validated_dec (sf)`, nsmall = 2, trim = FALSE)) %>%
+  
+  mutate(across(everything(), ~ str_replace(., "NaN", "-"))) %>% # Replace the NaNs (for example if STAR-Fusion had no validated predictions and we try to calculate a ratio from that) because 0/0 is undefined!
+  
+  mutate(`validated/predicted (arriba;sf)` = paste0(`validated/predicted_dec (arriba)`, ";", `validated/predicted_dec (sf)`)) %>% # join the decimal cols together
+  relocate(`validated/predicted_frac (sf)`, `validated/predicted (arriba;sf)`, .after = `validated/predicted_frac (arriba)`) %>% # relocation the joined decimal col after the fraction cols
+  select(-`validated/predicted_dec (arriba)`, -`validated/predicted_dec (sf)`) %>% # get rid of the individual decimal cols
+  rename(`validated/predicted (arriba)` = `validated/predicted_frac (arriba)`, # rename them to get rid of "_frac"
+         `validated/predicted (sf)` = `validated/predicted_frac (sf)`) %>%
+  
+  mutate(`discBreakSupport/validated (arriba;sf)` = paste0(`discBreakSupport/validated_dec (arriba)`, ";", `discBreakSupport/validated_dec (sf)`)) %>%
+  relocate(`discBreakSupport/validated_frac (sf)`, `discBreakSupport/validated (arriba;sf)`, .after = `discBreakSupport/validated_frac (arriba)`) %>%
+  select(-`discBreakSupport/validated_dec (arriba)`, -`discBreakSupport/validated_dec (sf)`) %>%
+  rename(`discBreakSupport/validated (arriba)` = `discBreakSupport/validated_frac (arriba)`,
+         `discBreakSupport/validated (sf)` = `discBreakSupport/validated_frac (sf)`) %>%
+  
+  mutate(`discSupportOnly/validated (arriba;sf)` = paste0(`discSupportOnly/validated_dec (arriba)`, ";", `discSupportOnly/validated_dec (sf)`)) %>%
+  relocate(`discSupportOnly/validated_frac (sf)`, `discSupportOnly/validated (arriba;sf)`, .after = `discSupportOnly/validated_frac (arriba)`) %>%
+  select(-`discSupportOnly/validated_dec (arriba)`, -`discSupportOnly/validated_dec (sf)`) %>%
+  rename(`discSupportOnly/validated (arriba)` = `discSupportOnly/validated_frac (arriba)`,
+         `discSupportOnly/validated (sf)` = `discSupportOnly/validated_frac (sf)`)
+```
+
+# Join to create summary supplementary table per cell line ####
+```{r}
+supp_table_cellLines <- cellLine_summary_subset %>%
+  left_join(wgs_mean_depth) %>%
+  left_join(cellLine_val_stats) # separated Arriba,STAR-Fusion
+```
+
+# Export it as a tsv!
+```{r}
+# write.table(supp_table_cellLines, file = "~/fusions/supplementary_cellLine_info.tsv", sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE) # Keep headers, don't add row numbers, don't put cells in quotes
+```
+
+# Save workspace
+
+```{r}
+save.image("fusions_suppTable.RData")
+```

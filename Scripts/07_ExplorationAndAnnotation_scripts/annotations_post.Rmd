@@ -1,0 +1,160 @@
+---
+title: "Annotating validated fusions - post"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Produces one final dataframe with all annotations together"
+version: "1.0.0"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load image from previous script
+
+```{r}
+load("~/fusions/Scripts/07_ExplorationAndAnnotation_scripts/annotations_promoterSwap.RData")
+```
+
+## Load packages
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0
+
+suppressPackageStartupMessages(library(rtracklayer, quietly = TRUE, warn.conflicts = FALSE)) # v1.62.0
+
+suppressPackageStartupMessages(library(readxl, quietly = TRUE, warn.conflicts = FALSE)) # v1.4.5
+```
+
+# Join all the annotations together
+
+## Join annotations for fusions EXCLUDING those marked as "both" for program (meaning, annotate each twin on separate rows)
+```{r}
+all_fusion_data_filtered_valStatus_annotated <- all_fusion_data_filtered_valStatus %>%
+  
+  filter(program != "both") %>%
+  
+  left_join(all_fusion_data_filtered_valStatus_promoterSwapCadindates) %>% # 1475 promoter swap candidates
+  left_join(all_fusion_data_filtered_valStatus_miRNA_hosts_sum) %>% # 558 5' hosts, 426 3' hosts
+  left_join(all_fusion_data_filtered_valStatus_kinases) %>% # 615 5' (151 in-frame), 416 3' (119 in-frame)
+  left_join(all_fusion_data_filtered_valStatus_mitelman) %>% # 1621 fusion matches (569 exact tissue matches, 16 inexact matches, 981 without a matching tissue, 55 with unknown tissue)
+  left_join(all_fusion_data_filtered_valStatus_tf) %>% # 806 fusion matches (184 exact tissue matches, 12 inexact matches, 610 without a matching tissue)
+  left_join(all_fusion_data_filtered_valStatus_tcga) %>% # 200 fusion matches (14 exact tissue matches, 0 inexact matches, 186 without a matching tissue)
+  left_join(all_fusion_data_filtered_valStatus_cgc) # 1145 5' CGC and 620 3' CGC
+```
+
+## Check that each twin also has identical annotations
+```{r}
+twin_annotations <- all_fusion_data_filtered_valStatus_annotated %>%
+  filter(twin == "TRUE") %>% # 5184, pulls only twins
+  select(twinID, fiveprime_miRNA_host:last_col()) %>% # pull the twinID column and all the annotation cols
+  distinct() # drops to 2592 as expected! Means the annotations for both rows for each twinID were identical!
+```
+
+## Join annotations for fusions ONLY for those marked as "both" for program
+```{r}
+all_fusion_data_filtered_valStatus_annotated_twins <- all_fusion_data_filtered_valStatus %>%
+  filter(program == "both") %>%
+  left_join(twin_annotations)
+
+# note, this dataset includes both validated and not-validated twins! The not-validated ones will have no annotations as expected
+```
+
+## Update all_fusion_data_filtered_valStatus_annotated by binding its rows with the annotations for fusions marked as "both" for program
+```{r}
+all_fusion_data_filtered_valStatus_annotated <- bind_rows(all_fusion_data_filtered_valStatus_annotated,all_fusion_data_filtered_valStatus_annotated_twins)
+```
+
+# Reformat and update the dataframe for efficiency
+
+## Add rearrange and add coordinate cols
+```{r}
+all_fusion_data_filtered_valStatus_annotated <- all_fusion_data_filtered_valStatus_annotated %>%
+  
+  # Initial relocation for formatting
+  relocate(fusion_name, geneID_fusionName, sampleID, rna_run_accession, wgs_run_accession, tissueType, disease, disease_stage, program, discordant_read_support, breakpoint_support, twin, twinID, multi_alt_fusion_allPred, altSplicing_id_allPred, multi_alt_fusion_valOnly, altSplicing_id_onlyVal, .after = fusion_id) %>%
+  
+  # Create a column with 5' partner hg38 gene coordinates in one cell
+  mutate(hg38_fiveprime_gene_gtf_coordinates = paste0(hg38_fiveprime_chr, ":", hg38_fiveprime_gene_gtfStart, "-", hg38_fiveprime_gene_gtfEnd, ":", fiveprime_gene_strand)) %>% # chr:gene_start
+  
+  # Create a column with 5' partner hg38 fusion junction coordinate in one cell
+  mutate(hg38_fiveprime_junction_coordinate = paste0(hg38_fiveprime_chr, ":", hg38_fiveprime_fusion_junction, ":", fiveprime_transcribed_strand)) %>%
+  
+  # Create a column with 5' partner hg19 gene coordinates in one cell
+  mutate(hg19_fiveprime_gene_coordinates = paste0(hg19_fiveprime_chr, ":", hg19_fiveprime_geneStart, "-", hg19_fiveprime_geneEnd, ":", fiveprime_gene_strand)) %>% # chr:gene_start
+  
+  # Create a column with 5' partner hg19 fusion junction coordinate in one cell
+  mutate(hg19_fiveprime_junction_coordinate = paste0(hg19_fiveprime_chr, ":", hg19_fiveprime_fusion_junction, ":", fiveprime_transcribed_strand)) %>% # don't include chr here! Will be the same chr as the 5' gene
+
+  # Create a column with 3' partner hg38 gene coordinates in one cell
+  mutate(hg38_threeprime_gene_gtf_coordinates = paste0(hg38_threeprime_chr, ":", hg38_threeprime_gene_gtfStart, "-", hg38_threeprime_gene_gtfEnd, ":", threeprime_gene_strand)) %>% # chr:gene_start
+  
+  # Create a column with 3' partner hg38 fusion junction coordinate in one cell
+  mutate(hg38_threeprime_junction_coordinate = paste0(hg38_threeprime_chr, ":", hg38_threeprime_fusion_junction, ":", threeprime_transcribed_strand)) %>%
+  
+  # Create a column with 3' partner hg19 gene coordinates in one cell
+  mutate(hg19_threeprime_gene_coordinates = paste0(hg19_threeprime_chr, ":", hg19_threeprime_geneStart, "-", hg19_threeprime_geneEnd, ":", threeprime_gene_strand)) %>% # chr:gene_start
+  
+  # Create a column with 3' partner hg19 fusion junction coordinate in one cell
+  mutate(hg19_threeprime_junction_coordinate = paste0(hg19_threeprime_chr, ":", hg19_threeprime_fusion_junction, ":", threeprime_transcribed_strand))
+```
+
+## Create character vector for groups of columns for simple relocation
+
+```{r}
+fiveprime_cols <- c("fiveprime_gene_name", "fiveprime_geneID", "fiveprime_gene_type", "fiveprime_gene_strand", "fiveprime_transcribed_strand")
+
+hg38_fiveprime_cols <- c("hg38_fiveprime_gene_gtf_coordinates", "hg38_fiveprime_junction_coordinate", "hg38_fiveprime_chr", "hg38_fiveprime_gene_gtfStart", "hg38_fiveprime_fusion_junction", "hg38_fiveprime_gene_gtfEnd", "hg38_fiveprime_searchStart", "hg38_fiveprime_searchEnd")
+
+hg19_fiveprime_cols <- c("hg19_fiveprime_gene_coordinates", "hg19_fiveprime_junction_coordinate", "hg19_fiveprime_chr", "hg19_fiveprime_geneStart", "hg19_fiveprime_fusion_junction", "hg19_fiveprime_geneEnd", "hg19_fiveprime_searchStart", "hg19_fiveprime_searchEnd")
+
+threeprime_cols <- c("threeprime_gene_name", "threeprime_geneID", "threeprime_gene_type", "threeprime_gene_strand", "threeprime_transcribed_strand")
+
+hg38_threeprime_cols <- c("hg38_threeprime_gene_gtf_coordinates", "hg38_threeprime_junction_coordinate", "hg38_threeprime_chr", "hg38_threeprime_gene_gtfStart", "hg38_threeprime_fusion_junction", "hg38_threeprime_gene_gtfEnd", "hg38_threeprime_searchStart", "hg38_threeprime_searchEnd")
+
+hg19_threeprime_cols <- c("hg19_threeprime_gene_coordinates", "hg19_threeprime_junction_coordinate", "hg19_threeprime_chr", "hg19_threeprime_geneStart", "hg19_threeprime_fusion_junction", "hg19_threeprime_geneEnd", "hg19_threeprime_searchStart", "hg19_threeprime_searchEnd")
+
+breakpoint_cols <- c("hg38_fiveprime_breakpoint_sanityPassingPair", "hg38_threeprime_breakpoint_sanityPassingPair", "hg38_fiveprime_breakpoint_sanityFailingPair", "hg38_threeprime_breakpoint_sanityFailingPair", "hg19_fiveprime_breakpoint_sanityPassingPair", "hg19_threeprime_breakpoint_sanityPassingPair", "hg19_fiveprime_breakpoint_sanityFailingPair", "hg19_threeprime_breakpoint_sanityFailingPair")
+
+transcriptionType_cols <- c("fiveprime_transcriptionType", "threeprime_transcriptionType")
+
+arriba_cols <- c("reading_frame_arriba", "fiveprime_junctionSite_arriba", "threeprime_junctionSite_arriba", "fusionType_arriba", "confidence_arriba", "tags_arriba", "retained_protein_domains_PfamArriba_arriba", "retained_protein_domains_PfamUCSC_arriba", "fiveprime_split_reads_arriba", "threeprime_split_reads_arriba", "discordant_mates_arriba", "fiveprime_coverage_arriba", "threeprime_coverage_arriba", "fiveprime_transcript_id_arriba", "threeprime_transcript_id_arriba", "fiveprime_direction_arriba", "threeprime_direction_arriba", "filters_arriba", "fusion_transcript_arriba", "peptide_sequence_arriba", "read_identifiers_arriba")
+
+sf_cols <-c("reading_frame_sf", "fiveprime_pfam_sf", "threeprime_pfam_sf", "annots_sf", "junctionReadCount_sf", "spanningFragCount_sf", "est_J_sf", "est_S_sf", "spliceType_sf", "largeAnchorSupport_sf", "ffpm_sf", "fiveprime_BreakDinuc_sf", "fiveprime_BreakEntropy_sf", "threeprime_BreakDinuc_sf", "threeprime_BreakEntropy_sf", "fiveprime_cds_ID_sf", "fiveprime_cds_range_sf", "threeprime_cds_ID_sf", "threeprime_cds_range_sf", "fusion_model_sf", "fusion_cds_sf", "fusion_transl_sf")
+```
+
+## Complete the reformatting with rearrangement
+```{r}
+all_fusion_data_filtered_valStatus_annotated <- all_fusion_data_filtered_valStatus_annotated %>%
+  relocate(all_of(fiveprime_cols), .after = altSplicing_id_onlyVal) %>%
+  relocate(all_of(hg38_fiveprime_cols), .after = fiveprime_transcribed_strand) %>%
+  relocate(all_of(hg19_fiveprime_cols), .after = hg38_fiveprime_searchEnd) %>%
+  
+  relocate(all_of(threeprime_cols), .after = hg19_fiveprime_searchEnd) %>%
+  relocate(all_of(hg38_threeprime_cols), .after = threeprime_transcribed_strand) %>%
+  relocate(all_of(hg19_threeprime_cols), .after = hg38_threeprime_searchEnd) %>%
+
+  relocate(all_of(breakpoint_cols), .after = hg19_threeprime_searchEnd) %>%
+  relocate(all_of(transcriptionType_cols), .after = hg19_threeprime_breakpoint_sanityFailingPair) %>%
+  
+  relocate(all_of(arriba_cols), .after = threeprime_transcriptionType) %>%
+  relocate(all_of(sf_cols), .after = read_identifiers_arriba)
+```
+
+Total = 356254 fusions because identical validated fusions are featured in separate lines and in the same line (each identical fusion represented 3 times)! If you exclude the fusion entry where program is "both", we have 33032 fusions (10997 of which are validated)
+
+# Export the complete dataframe as a tsv
+```{r}
+# write.table(all_fusion_data_filtered_valStatus_annotated, file = "~/fusions/allFusions_valAnnotated.tsv", sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE) # Keep headers, don't add row numbers, don't put cells in quotes
+# 
+# 
+# write.table(all_fusion_data_filtered_valStatus_annotated %>% filter(discordant_read_support == "TRUE"), file = "~/fusions/fusions_valAnnotated.tsv", sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE) # Keep headers, don't add row numbers, don't put cells in quotes
+```
+
+# Save workspace
+
+```{r}
+save.image("annotations_post.RData")
+```

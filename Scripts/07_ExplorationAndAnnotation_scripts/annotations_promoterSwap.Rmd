@@ -1,0 +1,105 @@
+---
+title: "Annotating validated fusions - promoter swapping candidates"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Annotates validated fusions which for promoter swapping candidates"
+version: "1.0.0"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load image from previous script
+
+```{r}
+load("~/fusions/Scripts/07_ExplorationAndAnnotation_scripts/annotations_CGC.RData")
+```
+
+## Load packages
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0
+
+suppressPackageStartupMessages(library(rtracklayer, quietly = TRUE, warn.conflicts = FALSE)) # v1.62.0
+
+suppressPackageStartupMessages(library(readxl, quietly = TRUE, warn.conflicts = FALSE)) # v1.4.5
+```
+
+# Possible promoter swapping event annotation
+
+## Update the gencode V44 annotation file to include only CDS type
+
+```{r}
+cds_start_gencodev44 <- as.data.frame(gencode_v44_gff3) %>% # we need these coords to compare to 5' + strand
+  filter(type == "CDS") %>% # 886087
+  select(seqnames, start, strand, gene_id, gene_name) %>% # there are genes that appear more than once! Because of annotations in other columns for different alt splicing protein products
+  group_by(gene_id) %>%
+  filter(start == min(start)) %>% # 60250! For each geneID, picked the lowest start coord
+  distinct() %>% # 20457 distinct start coords
+  filter(n() == 1) # 20457, all IDs appear only once and with their lowest possible start coordinate
+
+cds_end_gencodev44 <- as.data.frame(gencode_v44_gff3) %>% # we need these coords to compare to 5' - strand
+  filter(type == "CDS") %>% # 886087
+  select(seqnames, end, strand, gene_id, gene_name) %>% # there are genes that appear more than once! Because of annotations in other columns for different alt splicing protein products
+  group_by(gene_id) %>%
+  filter(end == max(end)) %>% # 59097! For each geneID, picked the highest end coord
+  distinct() %>% # 20457 distinct ends
+  filter(n() == 1) # 20457, all IDs appear only once and with their lowest possible start coordinate
+
+cds_merged_gencodev44 <- cds_start_gencodev44 %>%
+  left_join(cds_end_gencodev44) %>%
+  relocate(end, .after = start) # now we have the "complete coding region" as seen in UCSC genome browser, can cross-check OR4F5 and SAMD11 genes for support
+```
+
+## Identify promoter swapping candidates via validated 5' partners
+
+```{r}
+promoterSwap_candidates <- validated_fusions_fiveprimePartners %>%
+   
+  # Join with the cds GENCODE file
+  right_join(cds_merged_gencodev44, by = c("fiveprime_gene_name" = "gene_name", "fiveprime_geneID" = "gene_id", 
+                                           "hg38_fiveprime_chr" = "seqnames", "fiveprime_transcribed_strand" = "strand"), # transcribed strand = gene strand because validated_fusions_fiveprimePartners only includes sense
+             relationship = "many-to-many") %>% # 27023
+  
+  # Rename for clarity
+  rename(cds_start = "start",
+         cds_end = "end") %>%
+  
+  # Filter to only keep instances where fusion junction appears before the CDS
+  filter((fiveprime_transcribed_strand == "+" & hg38_fiveprime_fusion_junction < cds_start)
+         | (fiveprime_transcribed_strand == "-" & hg38_fiveprime_fusion_junction > cds_end )) %>% # 1475 entries after filtering
+  
+  # Get rid of these remaining CDS columns
+  select(-cds_start, -cds_end) %>% 
+  
+  # Sanity check
+  distinct() %>% # 1475, all are distinct
+  
+  # Create a column to identify that the fusion is a promoter swapping candidate
+  mutate(promoterSwapEventCandidate = "TRUE") # at this point, all entries here are promoter swapping candidates
+```
+
+## Join the promoter swapping candidate df with the larger df
+
+```{r}
+all_fusion_data_filtered_valStatus_promoterSwapCadindates <-  all_fusion_data_filtered_valStatus %>% # 35624 predictions (twins still appear with "both")
+  filter(program != "both") %>% # 33032
+  
+  left_join(promoterSwap_candidates) %>%
+  
+  # Update this column
+  mutate(promoterSwapEventCandidate = case_when( 
+    (discordant_read_support == "TRUE" & promoterSwapEventCandidate == "TRUE") ~ "TRUE", # if I already identified it as TRUE in the previous step, then keep the designation
+    (discordant_read_support == "TRUE" & is.na(promoterSwapEventCandidate)) ~ "FALSE", # add FALSE for all the non-candidates
+    (discordant_read_support == "FALSE") ~ NA # if not validated, then it shouldn't have an annotation
+    ))
+```
+
+# Save workspace
+
+```{r}
+save.image("annotations_promoterSwap.RData")
+```

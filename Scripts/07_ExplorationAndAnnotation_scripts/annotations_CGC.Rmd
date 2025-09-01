@@ -1,0 +1,176 @@
+---
+title: "Annotating validated fusions - CGC"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Annotates validated fusions which involve COSMIC CGC (v102) genes"
+version: "1.0.0"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load image from previous script
+
+```{r}
+load("~/fusions/Scripts/07_ExplorationAndAnnotation_scripts/annotations_TCGA.RData")
+```
+
+## Load packages
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0
+
+suppressPackageStartupMessages(library(rtracklayer, quietly = TRUE, warn.conflicts = FALSE)) # v1.62.0
+
+suppressPackageStartupMessages(library(readxl, quietly = TRUE, warn.conflicts = FALSE)) # v1.4.5
+```
+
+## COSMIC CGC
+```{r}
+# Download COSMIC Cancer Gene Census (CGC) tsv (tier 1 and tier 2) for GRCh38 (COSMIC v102, released 21-MAY-25) from https://cancer.sanger.ac.uk/census and save in Data/COSMIC_CGC
+cosmic_cgc_df <- read.csv("~/fusions/Data/COSMIC_CGC/Census_allMon_Jul_21_06_19_39_2025.tsv", sep = "\t", header = TRUE) # 758 entries
+```
+
+# COSMIC - Cancer Gene Census (CGC) annotation
+
+## Update the cosmic_cgc_df with relevant columns and columns names
+
+```{r}
+cosmic_cgc <- cosmic_cgc_df %>%
+  
+  # De-select unnecessary cols
+  select(-c("Entrez.GeneId", "Chr.Band", "Somatic", "Germline", "Molecular.Genetics", "Translocation.Partner", "Other.Germline.Mut", "Other.Syndrome")) %>%
+  
+  # Rename cols
+  rename(cgc_gene_symbol = "Gene.Symbol",
+         cgc_name = "Name",
+         cgc_genome_location = "Genome.Location",
+         cgc_tier = "Tier",
+         cgc_hallmark = "Hallmark",
+         cgc_tumour_types_somatic = "Tumour.Types.Somatic.",
+         cgc_tumour_types_germline = "Tumour.Types.Germline.",
+         cgc_cancer_syndrome = "Cancer.Syndrome",
+         cgc_tissue_type = "Tissue.Type",
+         cgc_role_in_cancer= "Role.in.Cancer",
+         cgc_mutation_types = "Mutation.Types",
+         cgc_synonyms = "Synonyms"
+         ) %>%
+  
+  # Separate cgc_genome_location into a chr and coords col
+  separate(cgc_genome_location, c("cgc_chr", "cgc_coords"), ":", fill = "right") %>% # the start and end coords are less important than the chromosome & gene name/id. The coords reported vary from full coords of the gene, even if you follow the link to the gene from cgc to ncbi, it will report the coords from the gtf like ours
+  
+  # Update chr col to follow our standard
+  mutate(cgc_chr = paste0("chr", cgc_chr)) %>%
+  
+  # Rename the tissue types using the coordinating types from the CGC abbreviation table 
+  mutate(cgc_tissue_type = str_replace_all(cgc_tissue_type, c("E" = "epithelial", "L" = "leukaemia_lymphoma", "O" = "other", "M" = "mesenchymal"))) %>% 
+  
+  # Rename the mutation type types using the coordinating types from the CGC abbreviation table 
+  mutate(cgc_mutation_types = str_replace_all(cgc_mutation_types, c("T" = "translocation", "Mis" = "missense", "A" = "amplification", 
+                                                                    "F" = "frameshift", "S" = "splice_site", "N" = "nonsense",
+                                                                    "D" = "large_deletion", "O" = "other"))) %>%
+  # Pull gene ID and base gene ID from synonyms col
+  mutate(cgc_geneID = str_extract(cgc_synonyms, "ENSG[^,]*"), # if you match by anything in the synonyms cols it would match less than ideal (i.e. ALK1 matching with ALK), so match at least on base geneID
+         cgc_geneID_base = sub("\\..*", "", cgc_geneID))
+```
+
+## Identify CGC genes involved in fusions
+
+### 5' partners
+
+```{r}
+validated_fusions_fiveprimePartners_cgc <- cosmic_cgc %>% #  758 as expected
+  
+  # Join with 5' partners df based only on chr
+  left_join(validated_fusions_fiveprimePartners, by = c("cgc_chr" = "hg38_fiveprime_chr"), relationship = "many-to-many") %>% # 433459 entries! Recall, no antisense in this df
+  
+  # Create column for the base gene ID
+  mutate(fiveprime_geneID_base = sub ("\\..*", "", fiveprime_geneID)) %>%
+  
+  # Filter based on gene name and base ID matches
+  filter(fiveprime_gene_name == cgc_gene_symbol | fiveprime_geneID_base == cgc_geneID_base) %>% # 1145 5' partners that appear in CGC
+  # The gene name OR symbol system catches the 8 instances where name is similar (but not exact), but the based ID matched.
+  # CARS1 vs. CARS and SEPTIN9 vs SEPT9. Verified on GeneCards
+  
+  # Create a col to quickly identify if 5' appears in CGC! 
+  mutate(cgc_fiveprime_gene = "TRUE") %>% # everything in the df now is "TRUE"
+  
+  # Select relevant cols
+  select(fusion_id, sampleID, cgc_fiveprime_gene, cgc_name, cgc_tier, cgc_hallmark, cgc_tumour_types_somatic, 
+         cgc_tumour_types_germline, cgc_cancer_syndrome, cgc_tissue_type, cgc_role_in_cancer, cgc_mutation_types) %>%
+  
+  rename(cgc_fiveprime_name = "cgc_name", # rename to specify "fiveprime" to keep things clear when we merge back with threeprime partners
+         cgc_fiveprime_tier = "cgc_tier",
+         cgc_fiveprime_hallmark ="cgc_hallmark",
+         cgc_fiveprime_tumour_types_somatic = "cgc_tumour_types_somatic",
+         cgc_fiveprime_tumour_types_germline = "cgc_tumour_types_germline",
+         cgc_fiveprime_cancer_syndrome = "cgc_cancer_syndrome",
+         cgc_fiveprime_tissue_type = "cgc_tissue_type",
+         cgc_fiveprime_role_in_cancer = "cgc_role_in_cancer",
+         cgc_fiveprime_mutation_types = "cgc_mutation_types")
+```
+
+### 3' partners
+```{r}
+validated_fusions_threeprimePartners_cgc <- cosmic_cgc %>% #  758 as expected
+  
+  # Join with 3' partners df based only on chr
+  left_join(validated_fusions_threeprimePartners, by = c("cgc_chr" = "hg38_threeprime_chr"), relationship = "many-to-many") %>% # 377093 entries! Recall, no antisense in this df
+  
+  # Create column for the base gene ID
+  mutate(threeprime_geneID_base = sub ("\\..*", "", threeprime_geneID)) %>%
+  
+  # Filter based on gene name and base ID matches
+  filter(threeprime_gene_name == cgc_gene_symbol | threeprime_geneID_base == cgc_geneID_base) %>% # 620 3' partners that appear in CGC
+  # The gene name OR symbol system catches the 4 instances where name is similar (but not exact), but the based ID matched.
+  # SEPTIN5 vs. SEPT5 and SEPTIN9 vs SEPT9. Verified on GeneCards
+  
+  # Create a col to quickly identify if 3' appears in CGC! 
+  mutate(cgc_threeprime_gene = "TRUE") %>% # everything in the df now is "TRUE"
+  
+  # Select relevant cols
+  select(fusion_id, sampleID, cgc_threeprime_gene, cgc_name, cgc_tier, cgc_hallmark, cgc_tumour_types_somatic, 
+         cgc_tumour_types_germline, cgc_cancer_syndrome, cgc_tissue_type, cgc_role_in_cancer, cgc_mutation_types) %>%
+  
+  rename(cgc_threeprime_name = "cgc_name", # rename to specify "threeprime" to keep things clear when we merge back with fiveprime partners
+         cgc_threeprime_tier = "cgc_tier",
+         cgc_threeprime_hallmark ="cgc_hallmark",
+         cgc_threeprime_tumour_types_somatic = "cgc_tumour_types_somatic",
+         cgc_threeprime_tumour_types_germline = "cgc_tumour_types_germline",
+         cgc_threeprime_cancer_syndrome = "cgc_cancer_syndrome",
+         cgc_threeprime_tissue_type = "cgc_tissue_type",
+         cgc_threeprime_role_in_cancer = "cgc_role_in_cancer",
+         cgc_threeprime_mutation_types = "cgc_mutation_types")
+```
+
+## Join identified 5' and 3' cgc partners with the larger df
+```{r}
+all_fusion_data_filtered_valStatus_cgc <- all_fusion_data_filtered_valStatus %>% # 35624 predictions (twins still appear with "both")
+  filter(program != "both") %>% # 33032
+  
+  # Join with the validated CGC dfs
+  left_join(validated_fusions_fiveprimePartners_cgc) %>%
+  left_join(validated_fusions_threeprimePartners_cgc) %>%
+  
+  #
+  mutate(cgc_fiveprime_gene = case_when(
+    (discordant_read_support == "TRUE" & cgc_fiveprime_gene == "TRUE") ~ "TRUE", # maintain the "TRUE" annotation we already added
+    (discordant_read_support == "TRUE" & is.na(cgc_fiveprime_gene)) ~ "FALSE", # if NA was introduced upon joining (because there wasn't a "TRUE" there, add a "FALSE)
+    (discordant_read_support == "FALSE") ~ NA # if not validated, then it shouldn't have an annotation
+    )) %>%
+  
+  mutate(cgc_threeprime_gene = case_when(
+    (discordant_read_support == "TRUE" & cgc_threeprime_gene == "TRUE") ~ "TRUE", # maintain the "TRUE" annotation we already added
+    (discordant_read_support == "TRUE" & is.na(cgc_threeprime_gene)) ~ "FALSE", # if NA was introduced upon joining (because there wasn't a "TRUE" there, add a "FALSE)
+    (discordant_read_support == "FALSE") ~ NA # if not validated, then it shouldn't have an annotation
+    ))
+```
+
+# Save workspace
+
+```{r}
+save.image("annotations_CGC.RData")
+```

@@ -1,0 +1,193 @@
+---
+title: "Annotating validated fusions - TCGA fusion catcher validations"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Annotates validated fusions which appear in the supplementary materials of Hafstað, Häkkinen, Larsson, et al., 2023 paper, validated fusion genes in TCGA samples (predicted w/ FusionCatcher)"
+version: "1.0.0"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load image from previous script
+
+```{r}
+load("~/fusions/Scripts/07_ExplorationAndAnnotation_scripts/annotations_tumorFusions.RData")
+```
+
+## Load packages
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0
+
+suppressPackageStartupMessages(library(rtracklayer, quietly = TRUE, warn.conflicts = FALSE)) # v1.62.0
+
+suppressPackageStartupMessages(library(readxl, quietly = TRUE, warn.conflicts = FALSE)) # v1.4.5
+```
+
+## Load files needed for annotations
+```{r}
+# Download txt file of validated fusion genes in TCGA samples (predicted with FusionCatcher) from the supp materials of of Hafstað Dec 2023 (Machine learning) paper (https://bmcgenomics.biomedcentral.com/articles/10.1186/s12864-023-09889-y#Sec23). Download and save the txt within a dir called Data/KnownFusions 
+TCGA_valFusions_df <- read.delim("~/fusions/Data/KnownFusions/12864_2023_9889_MOESM2_ESM.txt", header = TRUE, sep = "\t") # 4237 validated
+
+# call it TCGA val fusions for simplicity as it comes from TCGA data (even though technically tumorfusions also comes from TCGA. No other meaningful name for this dataset)
+```
+
+# Annotation with validated TCGA fusion genes
+
+## Update the TCGA_valFusions_df
+```{r}
+TCGA_valFusions_reformatted <- TCGA_valFusions_df %>%
+    filter(support_disc_reads == "TRUE") %>% # sanity check, still 4237
+  
+  # Pull the relevant cols
+  select(cancer_type, sample, fiveprimepartner, threeprimepartner, fiveprime_symbol, threeprime_symbol, fiveprime_chr, fiveprime_junction_hg38, fiveprime_strand, threeprime_chr, threeprime_junction_hg38, threeprime_strand) %>%
+  
+  # Create a fusion_name column which matches our formatting
+  mutate(fusion_name = paste0(fiveprime_symbol, "::", threeprime_symbol)) %>%
+  
+  relocate(fusion_name, .before = cancer_type) %>%
+  
+  # Rename cols to track that they came from TCGA
+  rename(tcga_hg38_fiveprime_chr = "fiveprime_chr",
+     tcga_hg38_threeprime_chr = "threeprime_chr",
+     tcga_sample = "sample",
+     tcga_cancer_type = "cancer_type",
+     tcga_hg38_fiveprime_fusion_junction = "fiveprime_junction_hg38",
+     tcga_hg38_threeprime_fusion_junction = "threeprime_junction_hg38"
+     ) %>%
+
+  # Update to follow our formatting
+  mutate(tcga_hg38_fiveprime_chr = paste0("chr", tcga_hg38_fiveprime_chr)) %>%
+  mutate(tcga_hg38_threeprime_chr = paste0("chr", tcga_hg38_threeprime_chr)) %>%
+  
+  mutate(tcga_tissueType = case_when( 
+    (tcga_cancer_type == "Bladder") ~ "BLADDER",
+    (tcga_cancer_type == "Breast") ~ "BREAST",
+    (tcga_cancer_type == "Cervix") ~ "CERVIX",
+    (tcga_cancer_type == "Esophagus") ~ "OESOPHAGUS",
+    (tcga_cancer_type == "Glioblastoma") ~ "CENTRAL_NERVOUS_SYSTEM",
+    (tcga_cancer_type == "Kidney") ~ "KIDNEY",
+    (tcga_cancer_type == "Lower grade glioma") ~ "CENTRAL_NERVOUS_SYSTEM",
+    (tcga_cancer_type == "Lung") ~ "LUNG",
+    (tcga_cancer_type == "Ovarian") ~ "OVARY"
+  ))
+```
+
+# TCGA matches
+```{r}
+TCGA_valFusions_matches <- validated_fusions_bothPartners %>% # 9413
+  
+  left_join(TCGA_valFusions_reformatted) %>% # 13537, joins by fusion_name
+  
+  # Only keep instances with matches to the TCGA dataset
+  filter(!is.na(tcga_cancer_type)) %>% # 362 matches
+  
+  # Sanity check! Pull the base geneID of our fusions and confirm that gene IDs and gene names match to what joined with TCGA! Same with chrs and strands
+  mutate(fiveprime_geneID_base = sub("\\..*", "", fiveprime_geneID),
+         threeprime_geneID_base = sub("\\..*", "", threeprime_geneID)) %>%
+  
+  filter(fiveprimepartner == fiveprime_geneID_base & threeprime_geneID_base == threeprimepartner & fiveprime_gene_name == fiveprime_symbol & threeprime_gene_name == threeprime_symbol) %>%
+  
+  filter(tcga_hg38_fiveprime_chr == hg38_fiveprime_chr & tcga_hg38_threeprime_chr == hg38_threeprime_chr) %>%
+  
+  filter(fiveprime_transcribed_strand == fiveprime_strand & threeprime_transcribed_strand == threeprime_strand) %>% # transcribed and gene strand are the same in the validated_fusions_bothPartners dataset because we only have sense fusions
+
+  # De-select these now redundant/unnecessary columns
+  select(-c("fiveprime_geneID_base", "threeprime_geneID_base", "fiveprimepartner", "threeprimepartner", "fiveprime_symbol", "threeprime_symbol", "tcga_hg38_fiveprime_chr", "tcga_hg38_threeprime_chr", "fiveprime_strand", "threeprime_strand")) %>%
+  
+  # Create a col with the status of the sets of fusion junctions. Is the 5' and 3' fusion junction an exact match, nearby, or differing match to our 5' and 3' fusion junctions
+  mutate(tcga_fiveprime_exactOrNear_juncMatch = case_when(
+      (abs(tcga_hg38_fiveprime_fusion_junction - hg38_fiveprime_fusion_junction) <= 5) ~ "TRUE", # catches both exact and nearby junctions (within 5bp misalignment)! 51 exact matches, 0 nearby matches
+    TRUE ~ "FALSE" # catch all other scenarios! TCGA match (we already pulled just matches, but not an exact or nearby junction
+  )) %>%
+  
+  mutate(tcga_threeprime_exactOrNear_juncMatch = case_when(
+      (abs(tcga_hg38_threeprime_fusion_junction - hg38_threeprime_fusion_junction) <= 5) ~ "TRUE", # catches both exact and nearby junctions (within 5bp misalignment)! 38 exact matches, 0 nearby matches
+    TRUE ~ "FALSE" # catch all other scenarios! TCGA match (we already pulled just matches, but not an exact or nearby junction
+  ))
+  
+  # interestingly, all which are assigned "TRUE" are exact matches! None are nearby matches (even up to 10 bp misalignment)
+```
+
+## Collapse the dataframe down so that a TCHA fusion which displays alt splicing is in one row (coords sep by |) and if multiple TCGA samples exhibit the same fusion also display that only on one row (sep by ,)
+```{r}
+TCGA_valFusions_matches_reformatted <- TCGA_valFusions_matches %>% # 362
+  # sample onwards should all be the same for each row! So we can group by those variables and they will still appear in final df
+  # group_by(fusion_id, tcga_sample, tcga_cancer_type, tcga_tissueType, tcga_fiveprime_exactOrNear_juncMatch, tcga_threeprime_exactOrNear_juncMatch) %>% 
+
+  group_by(fusion_id, tcga_sample, tcga_cancer_type, tcga_tissueType) %>% 
+  
+  # Collapse instances of alt-splicing for fusion junctions by |
+  summarize(
+    tcga_hg38_fiveprime_fusion_junction = paste(tcga_hg38_fiveprime_fusion_junction, collapse = "|"), # collapse instances of alt-splicing by |
+    tcga_hg38_threeprime_fusion_junction = paste(tcga_hg38_threeprime_fusion_junction, collapse = "|"), # collapse instances of alt-splicing by |
+    tcga_fiveprime_exactOrNear_juncMatch = paste(tcga_fiveprime_exactOrNear_juncMatch, collapse = "|"),
+    tcga_threeprime_exactOrNear_juncMatch = paste(tcga_threeprime_exactOrNear_juncMatch, collapse = "|"),
+    .groups = "drop"
+  ) %>%
+
+  # The same fusion can appear across different tumor fusions samples! Remove this column now
+  select(-tcga_sample) %>%
+  group_by(fusion_id) %>%
+  
+  # Summarize to collapse rows down! "," separates the same fusion pair appearing in a different tumor fusions samples
+  summarize(
+    tcga_cancer_type = paste(tcga_cancer_type, collapse = ","),
+    tcga_tissueType = paste(tcga_tissueType, collapse = ","),
+    tcga_hg38_fiveprime_fusion_junction = paste(tcga_hg38_fiveprime_fusion_junction, collapse = ","),
+    tcga_hg38_threeprime_fusion_junction = paste(tcga_hg38_threeprime_fusion_junction, collapse = ","),
+    tcga_fiveprime_exactOrNear_juncMatch = paste(tcga_fiveprime_exactOrNear_juncMatch, collapse = ","),
+    tcga_threeprime_exactOrNear_juncMatch = paste(tcga_threeprime_exactOrNear_juncMatch, collapse = ","),
+    .groups = "drop"
+  ) %>%
+  
+  # Join with the dataframe of validated fusions to pull tissue types
+  left_join(validated_fusions_bothPartners %>% select(fusion_id, tissueType)) %>%
+  
+  # Create a col for if tf matches are also have tissue type matches
+  mutate(tcga_tissue_match = case_when(
+    (tissueType == "BREAST" & str_detect(tcga_tissueType, "BREAST")) ~ "exact",
+    (tissueType == "LUNG" & str_detect(tcga_tissueType, "LUNG")) ~ "exact",
+    (tissueType == "CENTRAL_NERVOUS_SYSTEM" & str_detect(tcga_tissueType, "CENTRAL_NERVOUS_SYSTEM")) ~ "exact",
+    (tissueType == "KIDNEY" & str_detect(tcga_tissueType, "KIDNEY")) ~ "exact",
+    (tissueType == "OESOPHAGUS" & str_detect(tcga_tissueType, "OESOPHAGUS")) ~ "exact",
+    (tissueType == "OVARY" & str_detect(tcga_tissueType, "OVARY")) ~ "exact",
+    (tissueType == "URINARY_TRACT" & str_detect(tcga_tissueType, "BLADDER")) ~ "inexact",
+    (tissueType == "ENDOMETRIUM" & str_detect(tcga_tissueType, "CERVIX")) ~ "inexact",
+    TRUE ~ "no_match" # of TCGA & pipeline validated: 186 mismatching tissues, 14 exact tissue matches, 0 inexact tissue matches
+    # Recall, if our tissue matches any of the TCGA then it will be listed as having an exact match. If it has no exact matches, but an inexact then it will be listed as "inexact". If it has neither exact nor inexact matches, then it gets "no_match"
+  ))
+```
+
+## Create a larger predictions df with TCGA matches for validated fusions
+```{r}
+all_fusion_data_filtered_valStatus_tcga <- all_fusion_data_filtered_valStatus %>% # 35624 predictions (twins still appear with "both")
+  filter(program != "both") %>% # 33032
+  
+  left_join(TCGA_valFusions_matches_reformatted) %>%
+  
+  # Bring back this column to quickly identify if it is a tf match
+  mutate(tcga_match = case_when(
+    (discordant_read_support == "TRUE" & !is.na(tcga_cancer_type)) ~ "TRUE", # if this column is not empty, then it means there is a match!
+    
+    (discordant_read_support == "TRUE" & is.na(tcga_cancer_type)) ~ "FALSE", # if this column IS empty, it means it isn't a tcga match
+    
+    (discordant_read_support == "FALSE") ~ NA, # put NA in the column if there is no a discordant read support
+    )) %>%
+  
+  # Relocate cols
+  relocate(tcga_match, tcga_cancer_type, tcga_tissueType, tcga_tissue_match, tcga_hg38_fiveprime_fusion_junction, tcga_fiveprime_exactOrNear_juncMatch, tcga_hg38_threeprime_fusion_junction, tcga_threeprime_exactOrNear_juncMatch, .after = fusion_transl_sf)
+
+# note: tcga_tissue_match will be NA if tcga_match is NA or "FALSE"
+
+```
+
+# Save workspace
+
+```{r}
+save.image("annotations_TCGA.RData")
+```

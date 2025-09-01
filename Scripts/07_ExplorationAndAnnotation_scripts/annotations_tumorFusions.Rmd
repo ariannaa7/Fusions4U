@@ -1,0 +1,310 @@
+---
+title: "Annotating validated fusions - TumorFusions"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Annotates validated fusions which appear in the TumorFusions dataset"
+version: "1.0.0"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load image from previous script
+
+```{r}
+load("~/fusions/Scripts/07_ExplorationAndAnnotation_scripts/annotations_Mitelman.RData")
+```
+
+## Load packages
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0
+
+suppressPackageStartupMessages(library(rtracklayer, quietly = TRUE, warn.conflicts = FALSE)) # v1.62.0
+
+suppressPackageStartupMessages(library(readxl, quietly = TRUE, warn.conflicts = FALSE)) # v1.4.5
+```
+
+# Load files needed for annotations
+
+```{r}
+# Download supplementary folder from TumorFusions paper (https://pmc.ncbi.nlm.nih.gov/articles/PMC5753333/#sup1), save the folder in dir called Data/KnownFusions
+tumorFusions_df <- read_excel("~/fusions/Data/KnownFusions/gkx1018_supp/nar-02671-data-e-2017-File007.xlsx", sheet = "Cancer fusions") # 20731 fusions! hg19/GRCh37 per cited TCGA article (https://pmc.ncbi.nlm.nih.gov/articles/PMC5680778/)
+```
+
+# TumorFusions known fusion annotation
+
+## Update tumorFusions_df to be of a more similar format to our validated set
+```{r}
+tumorFusions_reformatted <- tumorFusions_df %>% # 20731 as expected
+  
+  # Rename the columns to match what we have in our validated set
+  rename(fiveprime_gene_name = "Gene_A", 
+         threeprime_gene_name = "Gene_B",
+         fiveprime_strand = "Gene A Strand",
+         threeprime_strand = "Gene B Strand",
+         tf_hg19_fiveprime_chr = "Gene A Chr", # we know it is hg19 based on the cited TCGA paper in TumorFusions paper
+         tf_hg19_threeprime_chr = "Gene B Chr",
+         tf_sample = "Sample",
+         tf_position_consistency = "Position Consistency",
+         tf_frame_prediction = "Frame Prediction") %>%
+  
+  # Create a fusion_name column which follows our formatting
+  mutate(fusion_name = str_c(fiveprime_gene_name, threeprime_gene_name, sep = "::")) %>% 
+  
+  # Update the strand column to follow our formatting
+  mutate(fiveprime_strand = case_when( 
+    (fiveprime_strand == "1") ~ "+",
+    (fiveprime_strand == "-1") ~ "-"
+  )) %>%
+  
+  mutate(threeprime_strand = case_when(
+    (threeprime_strand == "1") ~ "+",
+    (threeprime_strand == "-1") ~ "-"
+  )) %>%
+  
+  # One fusion can have multiple possible junctions (indicates alt splicing), put these fusions in different rows!!
+  separate_rows(Junction, sep = "\\|") %>% # 30496 rows now!
+  
+  # Separate into 5' and 3' junction information
+  separate(Junction, into = c("fiveprime_junc", "threeprime_junc"), sep = "_") %>% 
+  
+  # Split up the 5' junction col
+  separate(fiveprime_junc, into = c("fiveprime_gene_name_junc", "fiveprime_chr_junc", "tf_fiveprime_fusion_junction"), sep = ":") %>%
+  
+  # Split up the 3' junction col
+  separate(threeprime_junc, into = c("threeprime_gene_name_junc", "threeprime_chr_junc", "threeprime_fusion_junction_ANDjuncSpanReads"), sep = ":") %>% 
+  
+  # Further split up the 3' junction col because of the mystery after the comma
+  separate(threeprime_fusion_junction_ANDjuncSpanReads, into = c("tf_threeprime_fusion_junction", "extra"), sep = ",") %>%
+  
+  select(-extra) %>% # can't figure out what this column is for. Junction spanning reads again? Matches half the time
+  
+  # Remove rows where the 5' gene name is listed as a number and 5' partner junction gene name is an actual gene name (e.g 42987 == SEPT9)
+  filter(fiveprime_gene_name_junc == fiveprime_gene_name) %>% # 30414, removes 82 rows
+  
+  # Sanity check 
+  filter(tf_hg19_fiveprime_chr == fiveprime_chr_junc) %>% # 30414, good (passed sanity check)
+  
+  # Update the data type of the fusion junctions from character to numeric
+  mutate(tf_fiveprime_fusion_junction = as.numeric(tf_fiveprime_fusion_junction),
+         tf_threeprime_fusion_junction = as.numeric(tf_threeprime_fusion_junction)) %>%
+  
+  # Don't need these cols anymore as they would be dups of 5' gene name and chr cols
+  select(-fiveprime_gene_name_junc, -fiveprime_chr_junc) %>% 
+  
+  # Remove rows where the 3' gene name is listed as a number and 3' partner junction gene name is an actual gene name (e.g 42804 == MARCH10)
+  filter(threeprime_gene_name_junc == threeprime_gene_name) %>% # 30340, removes 74 rows 
+  
+  # Sanity check 
+  filter(tf_hg19_threeprime_chr == threeprime_chr_junc) %>% # 30316, dropped 24 cases where threeprime_chr was NA but chr_junc wasn't! Seems like junc chr is the one the 3' gene belongs too, but they omitted so we will remove the row
+  
+  # Don't need these cols anymore as they would be dups of 3' gene name and chr cols
+  select(-threeprime_gene_name_junc, -threeprime_chr_junc) %>% 
+  
+  # Update the chr column to follow our formatting
+  mutate(tf_hg19_fiveprime_chr = paste0("chr", tf_hg19_fiveprime_chr)) %>%
+  mutate(tf_hg19_threeprime_chr = paste0("chr", tf_hg19_threeprime_chr)) %>%
+  
+  # Add a column with the full disease name rather than the abbreviation
+  mutate(tf_disease = case_when(
+    (Tissue == "ACC") ~ "Adrenocortical carcinoma",
+    (Tissue == "BLCA") ~ "Bladder Urothelial Carcinoma",
+    (Tissue == "BRCA") ~ "Breast invasive carcinoma",
+    (Tissue == "CESC") ~ "Cervical squamous cell carcinoma and endocervical adenocarcinoma",
+    (Tissue == "CHOL") ~ "Cholangiocarcinoma",
+    (Tissue == "COAD") ~ "Colon adenocarcinoma",
+    (Tissue == "DLBC") ~ "Lymphoid Neoplasm Diffuse Large B-cell Lymphoma",
+    (Tissue == "ESCA") ~ "Esophageal carcinoma",
+    (Tissue == "GBM") ~ "Glioblastoma multiforme",
+    (Tissue == "HNSC") ~ "Head and Neck squamous cell carcinoma",
+    (Tissue == "KICH") ~ "Kidney Chromophobe",
+    (Tissue == "KIRC") ~ "Kidney renal clear cell carcinoma",
+    (Tissue == "KIRP") ~ "Kidney renal papillary cell carcinoma",
+    (Tissue == "LAML") ~ "Acute Myeloid Leukemia",
+    (Tissue == "LGG") ~ "Brain Lower Grade Glioma",
+    (Tissue == "LIHC") ~ "Liver hepatocellular carcinoma",
+    (Tissue == "LUAD") ~ "Lung adenocarcinoma",
+    (Tissue == "LUSC") ~ "Lung squamous cell carcinoma",
+    (Tissue == "MESO") ~ "Mesothelioma",
+    (Tissue == "OV") ~ "Ovarian serous cystadenocarcinoma",
+    (Tissue == "PAAD") ~ "Pancreatic adenocarcinoma",
+    (Tissue == "PCPG") ~ "Pheochromocytoma and Paraganglioma",
+    (Tissue == "PRAD") ~ "Prostate adenocarcinoma",
+    (Tissue == "READ") ~ "Rectum adenocarcinoma",
+    (Tissue == "SARC") ~ "Sarcoma",
+    (Tissue == "SKCM") ~ "Skin Cutaneous Melanoma",
+    (Tissue == "STAD") ~ "Stomach adenocarcinoma",
+    (Tissue == "TGCT") ~ "Testicular Germ Cell Tumors",
+    (Tissue == "THCA") ~ "Thyroid carcinoma",
+    (Tissue == "THYM") ~ "Thymoma",
+    (Tissue == "UCEC") ~ "Uterine Corpus Endometrial Carcinoma",
+    (Tissue == "UCS") ~ "Uterine Carcinosarcoma",
+    (Tissue == "UVM") ~ "Uveal Melanoma"
+  )) %>%
+  
+  # Add a column with the tissue type as assumed from the disease name
+  mutate(tf_tissueType = case_when( 
+    (Tissue == "ACC") ~ "ADRENAL_GLAND",
+    (Tissue == "BLCA") ~ "BLADDER",
+    (Tissue == "BRCA") ~ "BREAST",
+    (Tissue == "CESC") ~ "CERVIX",
+    (Tissue == "CHOL") ~ "BILE_DUCT",
+    (Tissue == "COAD") ~ "COLON",
+    (Tissue == "DLBC") ~ "HAEMATOPOIETIC_AND_LYMPHOID_TISSUE",
+    (Tissue == "ESCA") ~ "OESOPHAGUS",
+    (Tissue == "GBM") ~ "CENTRAL_NERVOUS_SYSTEM",
+    (Tissue == "HNSC") ~ "HEAD_AND_NECK",
+    (Tissue == "KICH") ~ "KIDNEY",
+    (Tissue == "KIRC") ~ "KIDNEY",
+    (Tissue == "KIRP") ~ "KIDNEY",
+    (Tissue == "LAML") ~ "HAEMATOPOIETIC_AND_LYMPHOID_TISSUE",
+    (Tissue == "LGG") ~ "CENTRAL_NERVOUS_SYSTEM",
+    (Tissue == "LIHC") ~ "LIVER",
+    (Tissue == "LUAD") ~ "LUNG",
+    (Tissue == "LUSC") ~ "LUNG",
+    (Tissue == "MESO") ~ "MESOTHELIUM",
+    (Tissue == "OV") ~ "OVARY",
+    (Tissue == "PAAD") ~ "PANCREAS",
+    (Tissue == "PCPG") ~ "ADRENAL_GLAND",
+    (Tissue == "PRAD") ~ "PROSTATE",
+    (Tissue == "READ") ~ "RECTUM",
+    (Tissue == "SARC") ~ "BONE_AND_SOFT_TISSUE",
+    (Tissue == "SKCM") ~ "SKIN",
+    (Tissue == "STAD") ~ "STOMACH",
+    (Tissue == "TGCT") ~ "TESTICULAR",
+    (Tissue == "THCA") ~ "THYROID",
+    (Tissue == "THYM") ~ "EPITHELIUM",
+    (Tissue == "UCEC") ~ "UTERUS",
+    (Tissue == "UCS") ~ "UTERUS",
+    (Tissue == "UVM") ~ "EYE"
+  )) %>%
+  
+  # Remove these specific columns as they can be looked up by user themselves from TumorFusions
+  select(-c(Tissue, `Discordant Read Pairs`, `Junction Spanning Reads`, `Number of Junctions`, `Blast Evalue`, `Transcriptional Alleleic Fraction`, `Frame Prediction Detail`)) %>% 
+  
+  # Relocate columns for better flow
+  relocate(fusion_name, tf_sample, tf_disease, tf_tissueType, .before = fiveprime_gene_name)
+```
+
+## Create a dataframe of Tumorfusions matches
+```{r}
+tumorFusions_matches <- validated_fusions_bothPartners %>% # 9413
+  
+  left_join(tumorFusions_reformatted) %>% # 13537, joins by fusion_name, fiveprime_gene_name, threeprime_gene_name
+  
+  # Create a column to identify if a validated fusion pair has a match in the tumor fusions dataset
+  mutate(tf_match = case_when(
+    (!is.na(tf_frame_prediction)) ~ "TRUE", # if this column is not empty, then it means there is a match!
+    
+    (is.na(tf_frame_prediction)) ~ "FALSE" # if this column IS empty, it means it isn't a tf match
+    )) %>%
+  
+  # Just filter to pull the Tumor Fusion Matches
+  filter(tf_match == "TRUE") %>% # drops to 4930
+  
+  # Create a col with the status of the sets of fusion junctions. Is the 5' and 3' fusion junction an exact match, nearby, or differing match to our 5' and 3' fusion junctions
+  mutate(tf_fiveprime_exactOrNear_juncMatch = case_when(
+      (abs(tf_fiveprime_fusion_junction - hg19_fiveprime_fusion_junction) <= 5) ~ "TRUE", # catches both exact and nearby junctions (within 5bp misalignment)! 1202 exact matches and 11 nearby matches
+    TRUE ~ "FALSE" # catch all other scenarios! TF match (we already pulled just matches, but not an exact or nearby junction
+  )) %>%
+  
+  mutate(tf_threeprime_exactOrNear_juncMatch = case_when(
+      (abs(tf_threeprime_fusion_junction - hg19_threeprime_fusion_junction) <= 5) ~ "TRUE", # catches both exact and nearby junctions (within 5bp misalignment)! 1012 exact matches and 17 nearby matches
+    TRUE ~ "FALSE" # catch all other scenarios! TF match (we already pulled just matches, but not an exact or nearby junction
+  )) %>%
+
+  rename(tf_hg19_fiveprime_fusion_junction = "tf_fiveprime_fusion_junction", # rename the columns so we know they are hg19
+         tf_hg19_threeprime_fusion_junction = "tf_threeprime_fusion_junction")
+
+```
+
+## Collapse the dataframe down so that a TumorFusions fusion which displays alt splicing is in one row (coords sep by |) and if multiple TF samples exhibit the same fusion also display that only on one row (sep by ,)
+```{r}
+tumorFusions_matches_reformatted <- tumorFusions_matches %>% # 4930
+  
+  # sample onwards should all be the same for each row! So we can group by those variables and they will still appear in final df
+  # group_by(fusion_id, tf_sample, tf_disease, tf_tissueType, tf_position_consistency, tf_frame_prediction, tf_fiveprime_exactOrNear_juncMatch, tf_threeprime_exactOrNear_juncMatch) %>% 
+  group_by(fusion_id, tf_sample, tf_disease, tf_tissueType, tf_position_consistency, tf_frame_prediction, tf_match) %>% 
+
+  
+  # Collapse instances of alt-splicing for fusion junctions by |
+  summarize(
+    tf_hg19_fiveprime_fusion_junction = paste(tf_hg19_fiveprime_fusion_junction, collapse = "|"), # collapse instances of alt-splicing by |
+    tf_hg19_threeprime_fusion_junction = paste(tf_hg19_threeprime_fusion_junction, collapse = "|"), # collapse instances of alt-splicing by |
+    tf_fiveprime_exactOrNear_juncMatch = paste(tf_fiveprime_exactOrNear_juncMatch, collapse = "|"),
+    tf_threeprime_exactOrNear_juncMatch = paste(tf_threeprime_exactOrNear_juncMatch, collapse = "|"),
+    .groups = "drop"
+  ) %>%
+
+  # The same fusion can appear across different tumor fusions samples! Remove this column now
+  select(-tf_sample) %>%
+  group_by(fusion_id) %>%
+  
+  # Summarize to collapse rows down! "," separates the same fusion pair appearing in a different tumor fusions samples
+  summarize(
+    tf_disease = paste(tf_disease, collapse = ","),
+    tf_tissueType = paste(tf_tissueType, collapse = ","),
+    tf_position_consistency = paste(tf_position_consistency, collapse = ","),
+    tf_frame_prediction = paste(tf_frame_prediction, collapse = ","),
+    tf_hg19_fiveprime_fusion_junction = paste(tf_hg19_fiveprime_fusion_junction, collapse = ","),
+    tf_hg19_threeprime_fusion_junction = paste(tf_hg19_threeprime_fusion_junction, collapse = ","),
+    tf_fiveprime_exactOrNear_juncMatch = paste(tf_fiveprime_exactOrNear_juncMatch, collapse = ","),
+    tf_threeprime_exactOrNear_juncMatch = paste(tf_threeprime_exactOrNear_juncMatch, collapse = ","),
+    .groups = "drop"
+  ) %>%
+  
+  # Join with the dataframe of validated fusions to pull tissue types
+  left_join(validated_fusions_bothPartners %>% select(fusion_id, tissueType)) %>%
+  
+  # Create a col for if tf matches are also have tissue type matches
+  mutate(tf_tissue_match = case_when(
+    (tissueType == "LUNG" & str_detect(tf_tissueType, "LUNG")) ~ "exact",
+    (tissueType == "BREAST" & str_detect(tf_tissueType, "BREAST")) ~ "exact",
+    (tissueType == "OVARY" & str_detect(tf_tissueType, "OVARY")) ~ "exact",
+    (tissueType == "STOMACH" & str_detect(tf_tissueType, "STOMACH")) ~ "exact",
+    (tissueType == "OESOPHAGUS" & str_detect(tf_tissueType, "OESOPHAGUS")) ~ "exact",
+    (tissueType == "HAEMATOPOIETIC_AND_LYMPHOID_TISSUE" & str_detect(tf_tissueType, "HAEMATOPOIETIC_AND_LYMPHOID_TISSUE")) ~ "exact",
+    (tissueType == "SKIN" & str_detect(tf_tissueType, "SKIN")) ~ "exact",
+    (tissueType == "ENDOMETRIUM" & str_detect(tf_tissueType, "UTERUS")) ~ "inexact",
+    (tissueType == "ENDOMETRIUM" & str_detect(tf_tissueType, "CERVIX")) ~ "inexact",
+    (tissueType == "LARGE_INTESTINE" & str_detect(tf_tissueType, "COLON")) ~ "inexact",
+    (tissueType == "LARGE_INTESTINE" & str_detect(tf_tissueType, "RECTUM")) ~ "inexact",
+    (tissueType == "URINARY_TRACT" & str_detect(tf_tissueType, "BLADDER")) ~ "inexact",
+    (tissueType == "UPPER_AERODIGESTIVE_TRACT" & str_detect(tf_tissueType, "HEAD_AND_NECK")) ~ "inexact",
+    (tissueType == "BONE" & str_detect(tf_tissueType, "BONE_AND_SOFT_TISSUE")) ~ "inexact",
+    (tissueType == "SOFT_TISSUE" & str_detect(tf_tissueType, "BONE_AND_SOFT_TISSUE")) ~ "inexact",
+    TRUE ~ "no_match" # of TumorFusions & pipeline validated: 610 mismatching tissues, 184 exact tissue matches, 12 inexact tissue matches
+    # Recall, if our tissue matches any of the TF then it will be listed as having an exact match. If it has no exact matches, but an inexact then it will be listed as "inexact". If it has neither exact nor inexact matches, then it gets "no_match"
+  ))
+```
+
+## Create a larger predictions df with TumorFusions matches for validated fusions
+```{r}
+all_fusion_data_filtered_valStatus_tf <- all_fusion_data_filtered_valStatus %>% # 35624 predictions (twins still appear with "both")
+  filter(program != "both") %>% # 33032
+  left_join(tumorFusions_matches_reformatted) %>%
+  
+  # Bring back this column to quickly identify if it is a tf match
+  mutate(tf_match = case_when(
+    (discordant_read_support == "TRUE" & !is.na(tf_frame_prediction)) ~ "TRUE", # if this column is not empty, then it means there is a match!
+    
+    (discordant_read_support == "TRUE" & is.na(tf_frame_prediction)) ~ "FALSE", # if this column IS empty, it means it isn't a tf match
+    
+    (discordant_read_support == "FALSE") ~ NA, # put NA in the column if there is no a discordant read support
+    )) %>%
+  
+  # Relocate cols
+  relocate(tf_match, tf_disease, tf_tissueType, tf_tissue_match, tf_hg19_fiveprime_fusion_junction, tf_fiveprime_exactOrNear_juncMatch, tf_hg19_threeprime_fusion_junction, tf_threeprime_exactOrNear_juncMatch, tf_position_consistency, tf_frame_prediction, .after = fusion_transl_sf)
+
+# note: tf_tissue_match will be NA if tf_match is NA or "FALSE"
+```
+
+# Save workspace
+
+```{r}
+save.image("annotations_tumorFusions.RData")
+```

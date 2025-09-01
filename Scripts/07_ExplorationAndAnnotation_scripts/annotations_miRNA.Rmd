@@ -1,0 +1,395 @@
+---
+title: "Annotating validated fusions - miRNA host genes"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Annotates validated fusions for miRNA host genes"
+version: "1.0.0"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load image from previous script
+
+```{r}
+load("~/fusions/Scripts/07_ExplorationAndAnnotation_scripts/annotation_prep.RData")
+```
+
+## Load packages
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0
+
+suppressPackageStartupMessages(library(rtracklayer, quietly = TRUE, warn.conflicts = FALSE)) # v1.62.0
+
+suppressPackageStartupMessages(library(readxl, quietly = TRUE, warn.conflicts = FALSE)) # v1.4.5
+```
+
+## Load files needed for annotations
+```{r}
+# Download hsa.gff3 (version 22) from https://www.mirbase.org/download/ . Rename file to hsa_v22.gff3 and create a dir in Data called miRNA to store the gff3
+miRBase_v22_gff3 <- import("~/fusions/Data/miRNA/hsa_v22.gff3")
+
+# Download this tab sep file of known microRNA host genes (protein-coding & non-coding host genes) from: https://www.genenames.org/cgi-bin/genegroup/download?id=1690&type=branch and name it microRNA_hostgenes_HGNC.tsv, store within Data/miRNA. Accessed on Jan 14, 2025
+# Will use it to assist in sifting through microRNAs that seem to exist within the boundaries of >1 "host" genes
+hgnc_microRNA_hostGenes <- read.csv("~/fusions/Data/miRNA/microRNA_hostgenes_HGNC.tsv", header = TRUE, sep = "\t")
+```
+
+# miRNA annotation
+
+## Convert miRBase_v22_gff3 & gencode_v44_gff3 from Large GRanges to df and & filter for entries relevant to our annotations
+
+### miRBase_v22_gff3 update
+```{r}
+miRBase_v22_df <- as.data.frame(miRBase_v22_gff3) %>% # 4801 entries
+  
+  # Isolate miRNA_primary_transcript types (hairpin precursor sequences)
+  filter(type == "miRNA_primary_transcript") %>% # 1918 entries
+  
+  select(-source, -score, -phase, -Derives_from) %>% # drop these columns, they are empty! Just hold NAs
+  
+  dplyr::rename(start_gff_miRBase = "start",
+         end_gff_miRBase = "end",
+         width_miRBase = "width",
+         type_miRBase = "type",
+         ID_miRBase = "ID",
+         Alias_miRBase = "Alias",
+         Name_miRBase = "Name") # rename to avoid issues when joining with gencode_v44_gff3
+  #group_by(Name_miRBase) %>%
+  #filter(n() > 1) # 8 appear more than once (hsa-mir-10401 and hsa-mir-4477a each have 4 replicates, same names but different start and end)
+```
+
+### gencode_v44_gff3 update
+```{r}
+gencode_v44_gff_df <- as.data.frame(gencode_v44_gff3) %>% # 3422073 entries
+  
+  # Looking for miRNA host genes -> only need "gene" type
+  filter(type == "gene") %>% # 62700 entries. 
+  
+  filter(gene_type != "miRNA" & gene_type != "misc_RNA" & gene_type != "snRNA" & gene_type != "scaRNA" & gene_type != "scRNA" & gene_type != "snoRNA") %>% # 55716 entries. These range between 41-464 bases in width (except snoRNAs range from 55-791) and aren't miRNA host genes (sanity checked via genome browser and igv)
+  
+  filter(width >= 900) # 42876 left! Less than 900 bp is really just too short to be host genes
+```
+
+## Identify genes that act as miRNA host genes AND genes with miRNAs identified within 2kb downstream
+
+### Create a function to prep the dfs
+```{r}
+hostGene_identification_prep <- function(microRNA_annotation, gencode_annotation, hgnc_microRNA_df) {
+  
+  df <- microRNA_annotation %>%
+    
+    # Match miRNAs to potential host genes by chromosome and strand
+    left_join(gencode_annotation %>% select(seqnames, start, end, width, strand, gene_id, gene_name, hgnc_id),
+              by = c("seqnames", "strand"),
+              relationship = "many-to-many") %>% # 1980992 rows
+    
+    left_join(hgnc_microRNA_df %>% select(`HGNC.ID`, `Approved.name`),
+              by = c("hgnc_id" = "HGNC.ID")) %>%
+    
+    select(-hgnc_id) # "Approved.name" will signify is a match so we don't need this column anymore
+  
+  return(df)
+  
+}
+```
+
+### Identify host genes (don't include a downstream buffer)
+```{r}
+hostGenes_miRBase22_gencode44_noBuffer <- hostGene_identification_prep(miRBase_v22_df, gencode_v44_gff_df, hgnc_microRNA_hostGenes) %>% # 198099 rows
+  
+  # Narrow down to miRNAs found within coordinates of genes
+  filter(start <= start_gff_miRBase & end_gff_miRBase <= end) %>% # 1487 miRNAs found within the coordinates of host genes. #Prior to checking for duplicates (miRNAs that appear to be within more than one host)
+  
+  # Rename these columns to keep track of what they are referencing in future join
+  dplyr::rename(host_gene_gffStart = "start", 
+         host_gene_gffEnd = "end",
+         host_gene_width = "width",
+         host_gene_id = "gene_id",
+         host_gene_name = "gene_name",
+         host_gene_approvedName = "Approved.name") # keep this column to know that it is a known miRNA host gene
+
+  #filter(!is.na(host_gene_approvedName)) # of the 1487 host genes we identified, 1065 are known hosts!
+```
+
+### Identify candidate miRNA host genes, meaning that an miRNA is located withn 2kb dowstream of the gene
+```{r}
+hostGenes_miRBase22_gencode44_Buffer <- hostGene_identification_prep(miRBase_v22_df, gencode_v44_gff_df, hgnc_microRNA_hostGenes) %>% # 198099 rows
+  
+  # keep only the potential host genes that were not in the hostGenes_miRBase22_gencode44_noBuffer df
+  anti_join(hostGenes_miRBase22_gencode44_noBuffer) %>% # 528725 rows
+  
+  # Provide a downstream buffer/flank to gencode coords, miRNA can be located in the 3' UTR region which can be annotated unreliably.
+  mutate(start_2kb_buffer = start - 2000,
+         end_2kb_buffer = end + 2000) %>% 
+  
+  # Filter based on strand! The microRNA should be located within 2kb downstream from the end of the gene
+  filter((strand == "+" & end <= start_gff_miRBase & end_gff_miRBase <= end_2kb_buffer) 
+         | (strand == "-" & start_2kb_buffer <= start_gff_miRBase & end_gff_miRBase <= start)) %>% # 39! Remember that "start" and "end" from gffs just mean the low and high coordinate number, not necessarily gene start/end which is based on strand.
+  
+  # Get rid of these cols! No longer needed
+  select(-start_2kb_buffer, -end_2kb_buffer) %>%
+  
+  # Sanity check that these miRNA were not already found within a host gene, next step filter for miRNAs not already found within a hostgene
+  filter(!(Name_miRBase %in% hostGenes_miRBase22_gencode44_noBuffer$Name_miRBase)) %>% # 39 microRNAs located within 2kb downstream of candidate host gene
+  
+  dplyr::rename(upstream_gene_gffStart = "start",
+         upstream_gene_gffEnd = "end",
+         upstream_gene_width = "width",
+         upstream_gene_id = "gene_id",
+         upstream_gene_name = "gene_name",
+         upstream_gene_approvedName = "Approved.name") # 39!
+
+# No miRNA appears to be 2kb downstream of multiple genes
+```
+
+## Identify primary miRNAs which are located within fusions
+
+### For 5' partners
+```{r}
+validated_fusions_fiveprimePartners_miRNA_hosts <- validated_fusions_fiveprimePartners %>% # 10903 validated, no antisense
+  
+  # Join with host genes df to filter out genes that don't act as 5' partners in fusions
+  right_join(hostGenes_miRBase22_gencode44_noBuffer,
+             by = c("hg38_fiveprime_chr" = "seqnames", "fiveprime_transcribed_strand" = "strand", "fiveprime_geneID" = "host_gene_id"),
+             relationship = "many-to-many") %>% # 4413 observations
+  
+  # Filter to only include 5' partners of fusions where miRNA coordinates fall within the fusion transcript coordinates of the 5' partner
+  filter(fiveprime_transcribed_strand == "+" & hg38_fiveprime_gene_gtfStart <= start_gff_miRBase & end_gff_miRBase <= hg38_fiveprime_fusion_junction 
+         | (fiveprime_transcribed_strand == "-" & hg38_fiveprime_fusion_junction <= start_gff_miRBase & end_gff_miRBase <= hg38_fiveprime_gene_gtfEnd)) %>% # 666 rows
+  
+  # Address instances of an miRNA appearing to belong in more than one host
+  filter(!(Name_miRBase == "hsa-mir-644a" & host_gene_name != "ITCH")) %>% # ITCH is a known miRNA host. ENSG00000289720 is a readthrough!
+  filter(!(Name_miRBase == "hsa-mir-4307" & host_gene_name != "MIR4307HG")) %>% # MIR4307HG is both a known miRNA host and contains HG in the name. filter out ENSG00000258081!
+  filter(!(Name_miRBase == "hsa-mir-1284" & host_gene_name != "FOXP1")) %>% # FOXP1 is a known miRNA host. ENSG00000285708 is a readthrough with overlapping loci
+  filter(!(Name_miRBase == "hsa-mir-583" & host_gene_name != "MIR583HG")) %>% # MIR583HG is both a known miRNA host and contains HG in the name. ENSG00000251314 has overlapping loci
+  
+  # Sanity check that they are all distinct
+  distinct() %>% # passed, still 654 and they are all distinct
+  
+  # Drop the HGNC holdover column. Was primarily used for filtering out miRNAs appearing to belong to more than one host
+  select(-host_gene_approvedName) %>%
+  
+  dplyr::rename(miRNA_fiveprime_gffStart = "start_gff_miRBase",
+         miRNA_fiveprime_gffEnd = "end_gff_miRBase",
+         miRNA_fiveprime = "Name_miRBase") %>%
+  
+  relocate(miRNA_fiveprime, .before = miRNA_fiveprime_gffStart) %>%
+    
+  # Get rid of unnecessary miRNA cols and 5' partner host gene cols which are redundant with the gene information already in the df
+  select(-width_miRBase, -type_miRBase, -ID_miRBase, -Alias_miRBase, # "type" is all primary transcript, "ID" and alias are identical and unneeded, width is not needed)
+         -host_gene_gffStart, -host_gene_gffEnd, -host_gene_width, -host_gene_name) %>%
+  
+  # Create a column with miRNA info: chr:start-end:strand
+  mutate(fiveprime_miRNA_coords = paste0(hg38_fiveprime_chr, ":", miRNA_fiveprime_gffStart, "-", miRNA_fiveprime_gffEnd, ":", fiveprime_transcribed_strand)) # recall that transcribed strand = gene strand because we've only included sense transcribed
+```
+
+### For 3' partners
+```{r}
+validated_fusions_threeprimePartners_miRNA_hosts <- validated_fusions_threeprimePartners %>% # 9506 validated, no antisense
+  
+  # Join with host genes df to filter out genes that don't act as 5' partners in fusions
+  right_join(hostGenes_miRBase22_gencode44_noBuffer,
+             by = c("hg38_threeprime_chr" = "seqnames", "threeprime_transcribed_strand" = "strand", "threeprime_geneID" = "host_gene_id"),
+             relationship = "many-to-many") %>% # 2412 observations
+  
+  # Filter to only include 3' partners of fusions where miRNA coordinates fall within the fusion transcript coordinates of the 3' partner
+  filter(threeprime_transcribed_strand == "+" & hg38_threeprime_fusion_junction <= start_gff_miRBase & end_gff_miRBase <= hg38_threeprime_gene_gtfEnd 
+         | (threeprime_transcribed_strand == "-" & hg38_threeprime_gene_gtfStart <= start_gff_miRBase & end_gff_miRBase <= hg38_threeprime_fusion_junction)) %>% # 534 rows
+
+  
+  # Address instances of an miRNA appearing to belong in more than one host
+  filter(!(Name_miRBase == "hsa-mir-644a" & host_gene_name != "ITCH")) %>% # ITCH is a known miRNA host. ENSG00000289720 is a readthrough!
+  filter(!(Name_miRBase == "hsa-mir-5094" & host_gene_name != "AP3S2")) %>% # AP3S2 is a known miRNA host. ARPIN-AP3S2 is a readthrough with overlapping loci!
+  filter(!(Name_miRBase == "hsa-mir-4655" & host_gene_name != "MAD1L1")) %>% # MAD1L1 is a known miRNA host. ENSG00000286192 is a readthrough with overlapping loci!
+  filter(!(Name_miRBase == "hsa-mir-148b" & host_gene_name != "COPZ1")) %>% # COPZ1 is a known miRNA host. ENSG00000258344 has overlapping loci!
+  filter(!(Name_miRBase == "hsa-mir-1284" & host_gene_name != "FOXP1")) %>% # FOXP1 is a known miRNA host. ENSG00000285708 is a readthrough with overlapping loci
+  filter(!(Name_miRBase == "hsa-mir-12127" & host_gene_name != "TATDN2")) %>% # TATDN2 is a known miRNA host. ENSG00000272410 is a readthrough with overlapping loci!
+
+  # Sanity check that they are all distinct
+  distinct() %>% # passed, still 521 and they are all distinct
+  
+  # Drop the HGNC holdover column. Was primarily used for filtering out miRNAs appearing to belong to more than one host
+  select(-host_gene_approvedName) %>%
+  
+  dplyr::rename(miRNA_threeprime_gffStart = "start_gff_miRBase",
+         miRNA_threeprime_gffEnd = "end_gff_miRBase",
+         miRNA_threeprime = "Name_miRBase") %>%
+  
+  relocate(miRNA_threeprime, .before = miRNA_threeprime_gffStart) %>%
+    
+  # Get rid of unnecessary miRNA cols and 3' partner host gene cols which are redundant with the gene information already in the df
+  select(-width_miRBase, -type_miRBase, -ID_miRBase, -Alias_miRBase, # "type" is all primary transcript, "ID" and alias are identical and unneeded, width is not needed)
+         -host_gene_gffStart, -host_gene_gffEnd, -host_gene_width, -host_gene_name) %>%
+  
+  # Create a column with miRNA info: chr:start-end:strand
+  mutate(threeprime_miRNA_coords = paste0(hg38_threeprime_chr, ":", miRNA_threeprime_gffStart, "-", miRNA_threeprime_gffEnd, ":", threeprime_transcribed_strand))# recall that transcribed strand = gene strand because we've only included sense transcribed
+```
+
+### For 3' partners - candidate hosts
+```{r}
+validated_fusions_threeprimePartners_miRNA_candidateHosts <- validated_fusions_threeprimePartners %>% # 9506 validated, no antisense
+  
+  # Join with host genes df to filter out genes that don't act as 5' partners in fusions
+  right_join(hostGenes_miRBase22_gencode44_Buffer,
+             by = c("hg38_threeprime_chr" = "seqnames", "threeprime_transcribed_strand" = "strand", "threeprime_geneID" = "upstream_gene_id"),
+             relationship = "many-to-many") %>% # 2412 observations
+  
+  # Provide a downstream buffer/flank, miRNA can be located in the 3' UTR region which can be annotated unreliably
+  mutate(upstreamGene_start_2kb_buffer = upstream_gene_gffStart - 2000, # "upstream" as in the gene upstream of the miRNA
+         upstreamGene_end_2kb_buffer = upstream_gene_gffEnd + 2000) %>%
+  
+  # Filter to only include 3' partners of fusions where miRNA coordinates fall within 2kb downstream of the gene end/fusion transcript end
+  filter(threeprime_transcribed_strand == "+" & hg38_threeprime_fusion_junction <= start_gff_miRBase & end_gff_miRBase <= upstreamGene_end_2kb_buffer 
+         | (threeprime_transcribed_strand == "-" & upstreamGene_start_2kb_buffer <= start_gff_miRBase & end_gff_miRBase <= hg38_threeprime_fusion_junction)) %>% # 7! This makes sense for 3' partners since what is downstream of the junction is included in the fusion transcript! Meaning the downstream miRNA could also be included
+  
+  # Sanity check that they are all distinct
+  distinct() %>% # passed, still 521 and they are all distinct
+  
+  # Drop the HGNC holdover column. Was primarily used for filtering out miRNAs appearing to belong to more than one host for 5' and 3' hosts
+  select(-upstream_gene_approvedName) %>%
+  
+  dplyr::rename(miRNA_downstream_threeprime_gffStart = "start_gff_miRBase",
+         miRNA_downstream_threeprime_gffEnd = "end_gff_miRBase",
+         miRNA_downstream_threeprime = "Name_miRBase") %>%
+  
+  relocate(miRNA_downstream_threeprime, .before = miRNA_downstream_threeprime_gffStart) %>%
+    
+  # Get rid of unnecessary miRNA cols and 3' partner host gene cols which are redundant with the gene information already in the df
+  select(-width_miRBase, -type_miRBase, -ID_miRBase, -Alias_miRBase, # "type" is all primary transcript, "ID" and alias are identical and unneeded, width is not needed)
+         -upstream_gene_gffStart, -upstream_gene_gffEnd, -upstream_gene_width, -upstream_gene_name, -upstreamGene_start_2kb_buffer, - upstreamGene_end_2kb_buffer) %>%
+  
+  # Create a column with miRNA info: chr:start-end:strand
+  mutate(threeprime_miRNA_downstream_coords = paste0(hg38_threeprime_chr, ":", miRNA_downstream_threeprime_gffStart, "-", miRNA_downstream_threeprime_gffEnd, ":", threeprime_transcribed_strand)) # recall that transcribed strand = gene strand because we've only included sense transcribed
+```
+
+
+## Join identified fusions with host genes to the larger predictions df - now with miRNA host gene info
+
+```{r}
+all_fusion_data_filtered_valStatus_miRNA_hosts <- all_fusion_data_filtered_valStatus %>% # 35624 predictions (twins still appear with "both")
+  filter(program != "both") %>% # 33032
+  
+  # Join the miRNA annotations to the larger df
+  left_join(validated_fusions_fiveprimePartners_miRNA_hosts) %>% # 33128 rows! Some fusion IDs host more than one miRNA in the 5' fusion partner
+  left_join(validated_fusions_threeprimePartners_miRNA_hosts) %>% # 33223 rows! Some fusion IDs host more than one miRNA in the 3' fusion partner
+  left_join(validated_fusions_threeprimePartners_miRNA_candidateHosts) %>% # 33223
+  
+  # Create columns to quickly identify if the partner acts as an miRNA host (host an miRNA within fusion transcript coords) or if 3' partner hosts a downstream miRNA
+  mutate(fiveprime_miRNA_host = case_when(
+    (discordant_read_support == "TRUE" & is.na(miRNA_fiveprime)) ~ "FALSE", # then it means it was in our validated set used for annotations (only sense transcribed), BUT not a host. Will also attach "false" to antisense 5' validated partners which were not included.
+    !(is.na(miRNA_fiveprime)) ~ "TRUE", # if there is an miRNA name, then they are a host
+    (discordant_read_support == "FALSE") ~ NA # if not validated, then it shouldn't have an annotation
+  )) %>%
+  
+  mutate(threeprime_miRNA_host = case_when( #
+    (discordant_read_support == "TRUE" & is.na(miRNA_threeprime)) ~ "FALSE", # again, validated but not a host
+    !(is.na(miRNA_threeprime)) ~ "TRUE",
+    (discordant_read_support == "FALSE") ~ NA # if not validated, then it shouldn't have an annotation
+
+  )) %>%
+  
+  mutate(threeprime_candidate_miRNA_host = case_when(
+    (discordant_read_support == "TRUE" & is.na(miRNA_downstream_threeprime)) ~ "FALSE", # again, validated but not a host
+    !(is.na(miRNA_downstream_threeprime)) ~ "TRUE",
+    (discordant_read_support == "FALSE") ~ NA # if not validated, then it shouldn't have an annotation
+
+  )) %>%
+  
+  # Relocate the cols
+  relocate(fiveprime_miRNA_host, .before = miRNA_fiveprime) %>%
+  relocate(threeprime_miRNA_host, .before = miRNA_threeprime) %>%
+  relocate(threeprime_candidate_miRNA_host, .before = miRNA_downstream_threeprime) %>%
+  
+  # Sanity check that all are distinct
+  distinct() # all 33223 are distinct
+  
+  #filter(fiveprime_miRNA_host == "TRUE" & threeprime_miRNA_host == "TRUE") # 18 instances where both 5' and 3' partner act as host!
+
+  # Duplicate fusion ids because one gene can host multiple miRNA
+  # Also recall that an miRNA can appear more than one time because it's host gene can appear more than once! Either the same fusion partners with different coordinates (still with transcript encompassing miRNA) or part of different fusion or predicted by both Arriba & STAR-Fusion
+```
+
+## Make a separate style df that lists each fusion only once and lists all the miRNAs they host (if they host any)
+
+### 5' partners
+```{r}
+validated_fusions_fiveprimePartners_miRNA_hosts_sum <- validated_fusions_fiveprimePartners_miRNA_hosts %>% # 654 rows as expected!
+  group_by(fusion_id) %>%
+  summarize(
+    miRNA_fiveprime = paste(miRNA_fiveprime, collapse = ","),
+    miRNA_fiveprime_gffStart = paste(miRNA_fiveprime_gffStart, collapse = ","),
+    miRNA_fiveprime_gffEnd = paste(miRNA_fiveprime_gffEnd, collapse = ","),
+    miRNA_fiveprime_coords = paste(fiveprime_miRNA_coords, collapse = ","),
+    .groups = "drop"
+    ) # 558 gene fusions where 5' partner acts as an miRNA host
+```
+
+### 3' partners
+
+```{r}
+validated_fusions_threeprimePartners_miRNA_hosts_sum <- validated_fusions_threeprimePartners_miRNA_hosts %>% # 521 rows as expected!
+  group_by(fusion_id) %>%
+  summarize(
+    miRNA_threeprime = paste(miRNA_threeprime, collapse = ","),
+    miRNA_threeprime_gffStart = paste(miRNA_threeprime_gffStart, collapse = ","),
+    miRNA_threeprime_gffEnd = paste(miRNA_threeprime_gffEnd, collapse = ","),
+    miRNA_threeprime_coords = paste(threeprime_miRNA_coords, collapse = ","),
+    .groups = "drop"
+  ) # 426 gene fusions where 3' partner acts as an miRNA host
+```
+
+### 3' partners - candidate hosts
+
+```{r}
+validated_fusions_threeprimePartners_miRNA_candidateHosts_sum <- validated_fusions_threeprimePartners_miRNA_candidateHosts %>% # 7 rows as expected!
+  select(fusion_id, miRNA_downstream_threeprime, miRNA_downstream_threeprime_gffStart, miRNA_downstream_threeprime_gffEnd,
+         threeprime_miRNA_downstream_coords) %>% # each fusion ID is unique already. Just select the same columns that are selected above
+  dplyr::rename(miRNA_downstream_threeprime_coords = "threeprime_miRNA_downstream_coords")
+```
+
+### Join together
+
+```{r}
+all_fusion_data_filtered_valStatus_miRNA_hosts_sum <- all_fusion_data_filtered_valStatus %>% # 35624 predictions (twins still appear with "both")
+  filter(program != "both") %>% # 33032
+  
+  # Join the sum-style miRNA annotations to the larger df
+  left_join(validated_fusions_fiveprimePartners_miRNA_hosts_sum) %>% # 33032 rows
+  left_join(validated_fusions_threeprimePartners_miRNA_hosts_sum) %>% # 33032 rows
+  left_join(validated_fusions_threeprimePartners_miRNA_candidateHosts_sum) %>% # 33032 rows!
+  
+  # Create columns to quickly identify if the partner acts as an miRNA host (host an miRNA within fusion transcript coords) or if 3' partner hosts a downstream miRNA
+  mutate(fiveprime_miRNA_host = case_when(
+    (discordant_read_support == "TRUE" & is.na(miRNA_fiveprime)) ~ "FALSE", # then it means it was in our validated set used for annotations (only sense transcribed), BUT not a host. Will also attach "false" to antisense 5' validated partners which were not included.
+    !(is.na(miRNA_fiveprime)) ~ "TRUE", # if there is an miRNA name, then they are a host
+    (discordant_read_support == "FALSE") ~ NA # if not validated, then it shouldn't have an annotation
+  )) %>%
+  
+  mutate(threeprime_miRNA_host = case_when( #
+    (discordant_read_support == "TRUE" & is.na(miRNA_threeprime)) ~ "FALSE", # again, validated but not a host
+    !(is.na(miRNA_threeprime)) ~ "TRUE",
+    (discordant_read_support == "FALSE") ~ NA # if not validated, then it shouldn't have an annotation
+
+  )) %>%
+  
+  mutate(threeprime_candidate_miRNA_host = case_when(
+    (discordant_read_support == "TRUE" & is.na(miRNA_downstream_threeprime)) ~ "FALSE", # again, validated but not a host
+    !(is.na(miRNA_downstream_threeprime)) ~ "TRUE",
+    (discordant_read_support == "FALSE") ~ NA # if not validated, then it shouldn't have an annotation
+
+  )) %>%
+  
+  # Relocate the cols
+  relocate(fiveprime_miRNA_host, miRNA_fiveprime, miRNA_fiveprime_coords, .before = miRNA_fiveprime_gffStart) %>%
+  relocate(threeprime_miRNA_host, miRNA_threeprime, miRNA_threeprime_coords, .before = miRNA_threeprime_gffStart) %>%
+  relocate(threeprime_candidate_miRNA_host, miRNA_downstream_threeprime, miRNA_downstream_threeprime_coords, .before = miRNA_downstream_threeprime_gffStart)
+```
+# Save workspace
+
+```{r}
+save.image("annotations_miRNA.RData")
+```

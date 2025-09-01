@@ -1,0 +1,173 @@
+---
+title: "Annotating validated fusions - Mitelman"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Annotates validated fusions which appear in the Mitelman Database of Gene Fusions in Cancer"
+version: "1.0.0"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load image from previous script
+
+```{r}
+load("~/fusions/Scripts/07_ExplorationAndAnnotation_scripts/annotations_kinases.RData")
+```
+
+## Load packages
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0
+
+suppressPackageStartupMessages(library(rtracklayer, quietly = TRUE, warn.conflicts = FALSE)) # v1.62.0
+
+suppressPackageStartupMessages(library(readxl, quietly = TRUE, warn.conflicts = FALSE)) # v1.4.5
+```
+
+## Load files needed for annotations
+
+```{r}
+# Download table of known gene fusions from the mitelman database (https://mitelmandatabase.isb-cgc.org/result), click "download" and save the csv within a dir called Data/KnownFusions - accessed on July 17, 2025. Database last updated July 10, 2025
+mitelman_fusions_df <- read.csv("~/fusions/Data/KnownFusions/mb_result.csv", sep = ",", header = TRUE) # 54084 entries, same as what shows on https://mitelmandatabase.isb-cgc.org/result, July 17, 2025
+```
+
+# Mitelman Database known fusion annotation
+
+## Update mitelman_fusions_df for only relevant entries (5' and 3' partner, known tissue type)
+```{r}
+mitelman_fusions_andTissues <- mitelman_fusions_df %>% # 54084 as expected
+  
+  # Rename the GeneShort col to match our naming
+  rename(fusion_name = "GeneShort") %>%
+  
+  # One morpho/topo/immuno/reference can have multiple gene fusions listed (sep by comma) so put them into separate rows
+  separate_rows(fusion_name, sep = ",") %>% # 54226 rows
+  
+  # Only keep fusions that clearly show 5' and 3' partner
+  filter(str_detect(fusion_name, '::')) %>% # 52672
+  
+  # Remove fusions that have "+" in the names
+  filter(!str_detect(fusion_name, "\\+")) %>% # 52661 Need to "cancel out" or "escape" typical meaning of + with the \\
+  # +BCR--ABL1 (unknown), +IGH--MYC (unknown), +PAX7--FOXO1 (soft tissue), +NUP214--ABL1 (unknown), +COL1A1--PDGFB (Soft tissue), IGH--BCL2,MYC+ -> all of these fusions appear again with the same tissue without the acute (?) + marker
+  
+  # Replace instances of empty/unknown tissue types to a uniform "unknown"
+  mutate(TopoName = case_when(
+    (TopoName == "" | TopoName == "Unknown site" | (is.na(TopoName))) ~ "unknown", # replaces 6802 instances
+    TRUE ~ TopoName # keep tissue name as is in all other instances
+    )) %>%
+  
+  # Select just the tissue column and fusion name
+  select(TopoName, fusion_name) %>%
+  
+  # Pull distinct instances of fusion names and tissue type
+  distinct() %>% # 37361
+  
+  # Only keep "unknowns" if that is the ONLY tissue type listed. Otherwise, it will mess with our tissue matching downstream. For example, if the fusion is found in breast and unknown tissue, but doesn't exist in breast tissue in our dataset -> then it should be marked as no_match NOT as "unknown". Should only be unknown if that is the ONLY tissue type option
+  group_by(fusion_name) %>%
+  filter(!(n() > 1 & any(TopoName != "unknown") & TopoName == "unknown")) %>% # drops 36995, if a fusion appears in multiple tissue types and at least one is not unknown, get rid of the unknown rows
+  ungroup() %>%
+  
+  # Replace the tissue names to include "_". Don't just replace " " with "_", there are some unique scenarios
+  mutate(TopoName = case_when(
+    grepl("Brain stem", TopoName) ~ "Brain_stem",
+    grepl("Fallopian tube", TopoName) ~ "Fallopian_tube",
+    grepl("Gallbladder/Biliary system", TopoName) ~ "Gallbladder/Biliary_system",
+    grepl("Large intestine", TopoName) ~ "Large_intestine",
+    grepl("Lymph node", TopoName) ~ "Lymph_node",
+    grepl("Nasal cavity/Paranasal sinuses", TopoName) ~ "Nasal_cavity/Paranasal_sinuses",
+    grepl("Oral cavity", TopoName) ~ "Oral_cavity",
+    grepl("Oro- and hypopharynx", TopoName) ~ "Oropharynx_and_hypopharynx",
+    grepl("Pineal body", TopoName) ~ "Pineal_body",
+    grepl("Salivary gland", TopoName) ~ "Salivary_gland",
+    grepl("Small intestine", TopoName) ~ "Small_intestine",
+    grepl("Soft tissue", TopoName) ~ "Soft_tissue",
+    grepl("Spinal cord", TopoName) ~ "Spinal_cord",
+    grepl("Uterus, cervix", TopoName) ~ "Uterus_cervix",
+    grepl("Uterus, corpus", TopoName) ~ "Uterus_corpus",
+    TRUE ~ TopoName # keep tissue name as is in all other instances
+    )) %>%
+  
+  # Reformat so each fusion appears just once. TopoName should have a comma separated list of all the tissues that fusion is found in
+  group_by(fusion_name) %>%
+  summarize(TopoName = paste(unique(TopoName), collapse = ",")) # 34511
+```
+
+## Identify fusions that appear in our dataset and in Mitelman
+```{r}
+validated_fusions_mitelman <- validated_fusions_bothPartners %>% # 9413
+  
+  left_join(mitelman_fusions_andTissues, by = "fusion_name") %>% # 9413
+  
+  # Create a column to identify if a validated fusion has a match to the Mitelman dataset
+  mutate(mitelmanFusion_match = case_when( 
+    (!(is.na(TopoName))) ~ "TRUE", # means that discordant_read_support == "TRUE" & TopoName is NOT empty = mitelman match
+    (is.na(TopoName)) ~ "FALSE", # means that discordant_read_support == "TRUE" & TopoName is empty = no mitelman match
+    )) %>%
+  
+  # Filter for just those validated fusions that have a Mitelman match. This will make it easier for identifying Mitelman matches with a mismatching tissue type
+  filter(mitelmanFusion_match == "TRUE") %>% # 1621
+
+  # Identify Mitelman fusions which have a tissue match to our validated fusions
+  mutate(mitelman_tissue_match = 
+           case_when( # again, if TopoName is not empty, it means it is a Mitelman match. So no need to add that as a condition
+             (str_detect(TopoName, "Breast") & str_detect(tissueType, "BREAST")) ~ "exact",
+             (str_detect(TopoName, "Kidney") & str_detect(tissueType, "KIDNEY")) ~ "exact",
+             (str_detect(TopoName, "Large_intestine") & str_detect(tissueType, "LARGE_INTESTINE")) ~ "exact",
+             (str_detect(TopoName, "Liver") & str_detect(tissueType, "LIVER")) ~ "exact",
+             (str_detect(TopoName, "Lung") & str_detect(tissueType, "LUNG")) ~ "exact",
+             (str_detect(TopoName, "Oesophagus") & str_detect(tissueType, "OESOPHAGUS")) ~ "exact",
+             (str_detect(TopoName, "Ovary") & str_detect(tissueType, "OVARY")) ~ "exact",
+             (str_detect(TopoName, "Pancreas") & str_detect(tissueType, "PANCREAS")) ~ "exact",
+             (str_detect(TopoName, "Pleura") & str_detect(tissueType, "PLEURA")) ~ "exact",
+             (str_detect(TopoName, "Prostate") & str_detect(tissueType, "PROSTATE")) ~ "exact",
+             (str_detect(TopoName, "Skeleton") & str_detect(tissueType, "BONE")) ~ "exact",
+             (str_detect(TopoName, "Skin") & str_detect(tissueType, "SKIN")) ~ "exact",
+             (str_detect(TopoName, "Soft_tissue") & str_detect(tissueType, "SOFT_TISSUE")) ~ "exact",
+             (str_detect(TopoName, "Stomach") & str_detect(tissueType, "STOMACH")) ~ "exact",
+             (str_detect(TopoName, "Thyroid") & str_detect(tissueType, "THYROID")) ~ "exact",
+             (str_detect(TopoName, "Bladder") & str_detect(tissueType, "URINARY_TRACT")) ~ "inexact",
+             (str_detect(TopoName, "Brain") & str_detect(tissueType, "CENTRAL_NERVOUS_SYSTEM")) ~ "inexact",
+             (str_detect(TopoName, "Nasal_cavity/Paranasal_sinuses") & str_detect(tissueType, "UPPER_AERODIGESTIVE_TRACT")) ~ "inexact",
+             (str_detect(TopoName, "Nasopharynx") & str_detect(tissueType, "UPPER_AERODIGESTIVE_TRACT")) ~ "inexact",
+             (str_detect(TopoName, "Oral_cavity") & str_detect(tissueType, "UPPER_AERODIGESTIVE_TRACT")) ~ "inexact",
+             (str_detect(TopoName, "Oropharynx_and_hypopharynx") & str_detect(tissueType, "UPPER_AERODIGESTIVE_TRACT")) ~ "inexact",
+             (str_detect(TopoName, "Salivary_gland") & str_detect(tissueType, "UPPER_AERODIGESTIVE_TRACT")) ~ "inexact",
+             (str_detect(TopoName, "Thymus") & str_detect(tissueType, "HAEMATOPOIETIC_AND_LYMPHOID_TISSUE")) ~ "inexact",
+             (str_detect(TopoName, "Uterus_cervix") & str_detect(tissueType, "ENDOMETRIUM")) ~ "inexact",
+             (str_detect(TopoName, "Uterus_corpus") & str_detect(tissueType, "ENDOMETRIUM")) ~ "inexact",
+             (TopoName == "unknown") ~ "unknown", # recall, if a fusion is only found in an unknown tissue type it is listed in this format! "unknown" would not be included in comma sep text if there is another tissue type option
+             TRUE ~ "no_match" # of mitelmanFusion & pipeline validated: unknown = 55,  no_match = 981, inexact = 16, exact = 569
+             )) %>%
+  
+  # Rename TopoName to a more meaningful name
+  rename(mitelman_tissueTypes = "TopoName")
+```
+
+## Create a larger predictions df with mitelman matches for validated fusions
+```{r}
+all_fusion_data_filtered_valStatus_mitelman <- all_fusion_data_filtered_valStatus %>% # 35624 predictions (twins still appear with "both")
+  filter(program != "both") %>% # 33032
+
+  # Join with the validated Mitelman fusion
+  left_join(validated_fusions_mitelman) %>%
+  
+  # Update the column to identify if a validated fusion has a match to the Mitelman dataset
+  mutate(mitelmanFusion_match = case_when( 
+    (mitelmanFusion_match == "TRUE") ~ "TRUE", # just keep it the same. Means discordant read support AND mitelman match
+    (discordant_read_support == "TRUE" & is.na(mitelman_tissueTypes)) ~ "FALSE", # put FALSE in the column if discordant read support but no mitelman match! Also catches scenarios of validated but antisense transcribed so it wasn't included in validated_fusions_bothPartners but should still be FALSE because technically validated
+    (discordant_read_support == "FALSE") ~ NA, # put NA in the column if there is no a discordant read support
+    )) %>% # 1621 true, 9376 FALSE, 22035 NA
+  
+  relocate(mitelmanFusion_match, mitelman_tissueTypes, mitelman_tissue_match, .after = fusion_transl_sf)
+# note: mitelman_tissue_match will be NA if mitelmanFusion_match is NA or "FALSE"
+```
+
+# Save workspace
+
+```{r}
+save.image("annotations_Mitelman.RData")
+```
