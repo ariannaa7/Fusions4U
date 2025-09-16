@@ -3,7 +3,7 @@ title: "Annotating validated fusions - post"
 author: "Arianna Alamshahi"
 output: html_document
 description: "Produces one final dataframe with all annotations together"
-version: "1.0.0"
+version: "1.0.1"
 ---
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -151,6 +151,16 @@ Total = 356254 fusions because identical validated fusions are featured in separ
 # 
 # 
 # write.table(all_fusion_data_filtered_valStatus_annotated %>% filter(discordant_read_support == "TRUE"), file = "~/fusions/fusions_valAnnotated.tsv", sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE) # Keep headers, don't add row numbers, don't put cells in quotes
+# 
+# 
+# write.table(all_fusion_data_filtered_valStatus_annotated %>% 
+#               filter(discordant_read_support == "TRUE" & program != "both") %>%
+#               select(-c("hg38_fiveprime_searchStart", "hg38_fiveprime_searchEnd", "hg19_fiveprime_searchStart", "hg19_fiveprime_searchEnd",
+#                         "hg38_threeprime_searchStart", "hg38_threeprime_searchEnd", "hg19_threeprime_searchStart", "hg19_threeprime_searchEnd",
+#                         "miRNA_fiveprime_gffStart", "miRNA_fiveprime_gffEnd", "miRNA_threeprime_gffStart", "miRNA_threeprime_gffEnd",
+#                         "miRNA_downstream_threeprime_gffStart", "miRNA_downstream_threeprime_gffEnd")),
+#             file = "~/fusions/additional_file_1.tsv", sep = "\t", 
+#             row.names = FALSE, col.names = TRUE, quote = FALSE) # Keep headers, don't add row numbers, don't put cells in quotes
 ```
 
 # Save workspace
