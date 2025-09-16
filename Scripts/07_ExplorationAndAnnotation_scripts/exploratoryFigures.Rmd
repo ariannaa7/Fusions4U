@@ -1,0 +1,1821 @@
+---
+title: "Figures for exploration and manuscript"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Figures and tables used for exploration and as figures/tables in manuscript"
+version: "1.0.0"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load image from previous script
+
+```{r}
+load("~/fusions/Scripts/07_ExplorationAndAnnotation_scripts/fusions_suppTable.RData")
+```
+
+## Load packages
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.50
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0
+```
+
+# Cell lines per tissue
+## Create a df with tissues and number of cell lines (origianl 328)
+```{r}
+tissue_sample_count_df <- id_tiss_acc_size %>%
+  group_by(tissueType) %>%
+  summarize(tissue_count = n(), .groups = "drop")
+```
+
+## Get the summary: countrange and median
+```{r}
+summary(tissue_sample_count_df$tissue_count)
+```
+Range: 1 - 98 cell lines for a tissue. Median = 10 cell lines per tissue
+
+# Initial numbers
+## Original number of Arriba predictions
+```{r}
+original_arriba_event_count <- nrow(all_fusion_data_updated %>%
+  filter(program == "arriba"))
+
+original_arriba_event_count
+```
+39,556 Arriba predictions originally
+
+## Original numbers of STAR-Fusion predictions
+```{r}
+original_sf_event_count <- nrow(all_fusion_data_updated %>%
+  filter(program == "star-fusion"))
+
+original_sf_event_count
+```
+
+6123 STAR-Fusion predictions originally
+
+# Input numbers - fusions input to fusion validation pipeline
+## Inputs numbers - Arriba predictions
+```{r}
+input_arriba_event_count <- nrow(pipeline_input_allCols %>%
+  filter(program == "arriba"))
+
+input_arriba_event_count
+
+paste0((
+  (input_arriba_event_count / original_arriba_event_count) * 100),
+  "%")
+```
+27,258 Arriba predictions input to the pipeline
+68.91% (round to 69%) of the original Arriba predictions were input to the pipeline
+
+## Inputs numbers - STAR-Fusion predictions
+```{r}
+input_sf_event_count <- nrow(pipeline_input_allCols %>%
+  filter(program == "star-fusion"))
+
+input_sf_event_count
+
+paste0(
+  ((input_sf_event_count / original_sf_event_count) * 100),
+  "%")
+```
+5774 STAR-Fusion predictions input to the pipeline
+94.30% (round to 94%) of the original STAR-Fusion predictions were input to the pipeline
+
+# Twin/ensemble counts - predicted
+```{r}
+predicted_twins_count <-
+  nrow(all_fusion_data_filtered_valStatus_annotated %>%
+    filter(program == "both")) # 2592 twins (representing 5184 total in the dataset)
+
+# What percent of the total set of unique predictions were accounted for by twins?
+paste0(
+  ((predicted_twins_count)/nrow(pipeline_input_allCols)*100),
+  "%")
+
+paste0(
+  ((predicted_twins_count * 2)/nrow(pipeline_input_allCols)*100),
+  "%") # x2 because accounting for the Arriba and STAR-Fusion predictions which appear twice in the dataset
+```
+Overlap in identically predicted fusion transcripts: 2592 (meaning 5184 total)
+7.85% (round to 8%) of predictions in the pipeline were identically predicted by the other program
+15.69% (round to 16%) of the predictions input to the pipeline were twins
+
+## Twin counts - Arriba, predicted
+```{r}
+paste0(
+  ((predicted_twins_count/input_arriba_event_count)*100),
+  "%")
+```
+9.51% (round to 10%) of fusions predicted by Arriba were identically predicted by STAR-Fusion
+
+## Twin counts - STAR-Fusion, predicted
+```{r}
+paste0(
+  ((predicted_twins_count/input_sf_event_count)*100),
+  "%")
+```
+44.89% (round to 45%) of fusions predicted by STAR-Fusion were identically predicted by Arriba
+
+# Figure 1 - Tissue and cell line overview
+
+## Number of cell-lines that have RNA-Seq & matching WGS
+```{r}
+tissue_sample_count_df <- tissue_sample_count_df %>% # update this existing df
+  # Change tissue types to be lower case, swap underscores for spaces, then uppercase first letter
+  mutate(tissueType = str_replace_all(tolower(tissueType), "_", " ") %>%
+    str_to_sentence())
+
+tissue_sample_count_plot <-
+  ggplot(tissue_sample_count_df, aes(x = tissueType, y = tissue_count)) +
+  geom_bar(stat = "identity") +
+  labs(x = "", y = "Number of cell lines") +
+  theme_minimal() + # minimal theme, white background
+  theme(
+    panel.grid = element_blank(), # get rid of all gridlines
+    axis.line = element_line(color = "black"), # bring back the x & y axis line
+    axis.ticks = element_line(color = "black"), # bring back axis ticks
+    axis.text = element_text(color = "black") # make axis tick labels black
+  ) +
+  theme(axis.text.x = element_text(angle = 50, hjust = 1)) # tilt x-axis label
+
+
+# ggsave(
+#   "~/fusions/Figures/Figure_1/tissues.pdf",
+#   plot = tissue_sample_count_plot,
+#   width = 14,
+#   height = 8,
+#   units = "in"
+# )
+```
+
+
+## Chimeric transcripts per sample - based on all filtered predictions input to pipeline!
+
+### Create a function to make the df
+```{r}
+chimericPerSample <- function(predictions_df, program_name) {
+  df <- predictions_df %>%
+    filter(program == tolower(program_name)) %>%
+    group_by(sampleID, tissueType) %>%
+    summarize(
+      chimeric_transcriptCount_perSample = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(tissueType = str_replace_all(tolower(tissueType), "_", " ") %>% # change tissue types to be lower case, swap underscores for spaces, then uppercase first letter
+      str_to_sentence()) %>%
+    mutate(tissueType = fct_rev(factor(tissueType))) # make tissue types as.factor but reverse (so Z-A instead of A-Z). Then when we plot and do coord_flip it will appear A-Z
+
+  return(df)
+}
+```
+
+### Create a function to make the plot
+```{r}
+chimericPerSample_plot <-
+  function(chimericPerSample_df, program_name) {
+    if (tolower(program_name) == "arriba") {
+      color_code <- "#931111"
+    }
+
+    if (tolower(program_name) == "star-fusion") {
+      color_code <- "#19196C"
+    }
+
+    plot <-
+      ggplot(
+        chimericPerSample_df,
+        aes(x = tissueType, y = chimeric_transcriptCount_perSample, fill = tissueType)
+      ) +
+      geom_boxplot(fill = "white", color = color_code) + # color code the boxes based on program
+      coord_flip() + # type on y, count on x
+      labs(x = "", y = "Predicted fusion transcripts per cell line") +
+      theme_minimal() +
+      theme(
+        panel.grid = element_blank(),# get rid of all gridlines
+        axis.line = element_line(color = "black"),# bring back the x & y axis line
+        axis.ticks = element_line(color = "black"),# bring back axis ticks
+        axis.text = element_text(color = "black") # make axis tick labels black
+      )
+
+    return(plot)
+  }
+```
+
+### Run the functions & save 
+```{r}
+chimeric_transcripts_filtered_arriba <-
+  chimericPerSample(pipeline_input_allCols, "arriba")
+
+sum(chimeric_transcripts_filtered_arriba$chimeric_transcriptCount_perSample) # 27258 as expected
+
+# ggsave(
+#   "~/fusions/Figures/Figure_1/chimeric_arriba.pdf",
+#   plot = chimericPerSample_plot(chimeric_transcripts_filtered_arriba, "arriba"),
+#   width = 8,
+#   height = 8,
+#   units = "in"
+# )
+
+chimeric_transcripts_filtered_sf <-
+  chimericPerSample(pipeline_input_allCols, "star-fusion")
+
+sum(chimeric_transcripts_filtered_sf$chimeric_transcriptCount_perSample) # 5774 as expected
+
+# ggsave(
+#   "~/fusions/Figures/Figure_1/chimeric_sf.pdf",
+#   plot = chimericPerSample_plot(chimeric_transcripts_filtered_sf, "star-fusion"),
+#   width = 8,
+#   height = 8,
+#   units = "in"
+# )
+```
+
+# Validation numbers
+## Discordant read support (at minimum) - Arriba
+```{r}
+disc_val_arriba_event_count <-
+  nrow(
+    all_fusion_data_filtered_valStatus %>%
+      filter(program == "arriba") %>%
+      filter(discordant_read_support == "TRUE")
+  )
+
+disc_val_arriba_event_count
+
+paste0(
+  ((disc_val_arriba_event_count / input_arriba_event_count) * 100),
+  "%")
+
+```
+8753 of Arriba predictions input to the pipeline were validated with AT LEAST discordant read support
+32.11% (round to 32%) of the INPUT Arriba predictions were validated with at least discordant read support
+
+## Discordant read support AND genomic breakpoint support - Arriba
+```{r}
+discBreak_val_arriba_event_count <-
+  nrow(
+    all_fusion_data_filtered_valStatus %>%
+      filter(program == "arriba") %>%
+      filter(discordant_read_support == "TRUE" &
+        breakpoint_support == "TRUE")
+  )
+
+discBreak_val_arriba_event_count
+
+paste0(
+  ((discBreak_val_arriba_event_count/disc_val_arriba_event_count) * 100),
+  "%")
+
+paste0(
+  ((discBreak_val_arriba_event_count/input_arriba_event_count) * 100),
+  "%")
+
+```
+7428 of Arriba predictions input to the pipeline were validated with discordant read support AND genomic breakpoint support
+84.86% (round to 85%) of the discordant read validated Arriba predictions were also validated with genomic breakpoint support
+27.25% (round to 27%) of the INPUT Arriba predictions were validated with both discordant read support and genomic breakpoint support
+
+## Discordant read support (at minimum) - STAR-Fusion
+```{r}
+disc_val_sf_event_count <-
+  nrow(
+    all_fusion_data_filtered_valStatus %>%
+      filter(program == "star-fusion") %>%
+      filter(discordant_read_support == "TRUE")
+  )
+
+disc_val_sf_event_count
+
+paste0(
+  ((disc_val_sf_event_count/input_sf_event_count) * 100),
+  "%")
+
+```
+2244 of STAR-Fusion predictions input to the pipeline were validated with AT LEAST discordant read support
+38.86% (round to 39%) of the INPUT STAR-Fusion predictions were validated with at least discordant read support
+
+## Discordant read support AND genomic breakpoint support - STAR-Fusion
+```{r}
+discBreak_val_sf_event_count <-
+  nrow(
+    all_fusion_data_filtered_valStatus %>%
+      filter(program == "star-fusion") %>%
+      filter(discordant_read_support == "TRUE" &
+        breakpoint_support == "TRUE")
+  )
+
+discBreak_val_sf_event_count
+
+paste0(
+  ((discBreak_val_sf_event_count/disc_val_sf_event_count) * 100),
+  "%")
+
+paste0(
+  ((discBreak_val_sf_event_count/input_sf_event_count) * 100),
+  "%")
+
+```
+2045 of STAR-Fusion predictions input to the pipeline were validated with discordant read support AND genomic breakpoint support
+91.13% (round to 91%) of the discordant read validated STAR-Fusion predictions were also validated with genomic breakpoint support
+35.42% (round to 35%) of the INPUT STAR-Fusion predictions were validated with both discordant read support and genomic breakpoint support
+
+
+# Cell lines with validated fusions
+## Arriba - cell lines with validated fusions
+```{r}
+cellLines_withVals_arriba <- nrow(
+  all_fusion_data_filtered_valStatus %>%
+    filter(program == "arriba" & discordant_read_support == "TRUE") %>%
+    distinct(sampleID)
+)
+
+cellLines_withVals_arriba
+
+paste0(
+  ((cellLines_withVals_arriba/nrow(all_fusion_data_filtered_valStatus %>% distinct(sampleID))) * 100),
+  "%")
+```
+322 of the original 328 cell lines have validated Arriba predictions
+98.17% (round to 98%) of the original 328 cell lines have validated Arriba predictions
+
+```{r}
+cellLines_withVals_sf <- nrow(
+  all_fusion_data_filtered_valStatus %>%
+    filter(program == "star-fusion" & discordant_read_support == "TRUE") %>%
+    distinct(sampleID)
+)
+
+cellLines_withVals_sf
+
+paste0(
+  ((cellLines_withVals_sf/nrow(all_fusion_data_filtered_valStatus %>% distinct(sampleID))) * 100),
+  "%")
+```
+299 of the original 328 cell lines have validated STAR-Fusion predictions
+91.15% (round to 91%) of the original 328 cell lines have validated STAR-Fusion predictions
+
+# Twin/ensemble counts - validated
+```{r}
+val_twins_count <- nrow(
+  all_fusion_data_filtered_valStatus_annotated %>%
+    filter(program == "both" & discordant_read_support == "TRUE")
+) # 1596 validated (representing 3192 events in the full VALIDATED dataset)
+
+val_twins_count
+
+paste0(
+  ((val_twins_count/predicted_twins_count) * 100),
+  "%")
+```
+1596 of the 2592 twin predictions were validated! This represents 3192 validated events in the full validated dataset
+61.57% (round to 62%) of ensemble predictions were validated
+
+## Twin counts - Arriba, validated
+```{r}
+paste0(
+  ((val_twins_count/disc_val_arriba_event_count)*100),
+  "%")
+```
+18.23% (round to 18%) of validated Arriba predictions identically predicted by STAR-Fusion
+
+## Twin counts - STAR-Fusion, validated
+```{r}
+paste0(
+  ((val_twins_count/disc_val_sf_event_count)*100),
+  "%")
+```
+71.12% (round to 71%) of validated STAR-Fusion predictions identically predicted by Arriba
+ 
+ # Twin/ensemble vs. not
+```{r}
+ensemble_v_not_valPercentages <- all_fusion_data_filtered_valStatus_annotated %>%
+  filter(program != "both") %>% # keep only "arriba" and "star-fusion"
+  group_by(program, twin) %>%
+  mutate(twin_status_count = n()) %>% # get the total number for that program and twin type
+  group_by(program, twin, discordant_read_support, twin_status_count) %>%
+  summarize(disc_status_count = n(), .groups = "drop") %>% # get the count for discordant read
+  mutate(percentage = (disc_status_count / twin_status_count) * 100) # percentage for each combination of program, twin or not, and validated or not
+
+ensemble_v_not_valPercentages
+```
+Arriba:
+Of non-ensemble predictions, 29.02% (round to 29%) were validated
+Of ensemble predictions, 61.57% (round to 62%) were validated
+
+STAR-Fusion:
+Of non-ensemble predictions, 20.36% (round to 20%) were validated
+Of ensemble predictions, 61.57% (round to 62%) were validated
+
+# Twin/ensemble chi-sq
+## Ensemble chi-sq, Arriba
+```{r}
+twin_freq_arriba <- all_fusion_data_filtered_valStatus_annotated %>% # all predictions validated or not were annotated
+  filter(program == "arriba") %>% # excludes "both" and "star-fusion"
+  group_by(discordant_read_support, twin) %>%
+  summarize(status_count = n(), .groups = "drop") %>%
+  mutate(freq = status_count / sum(status_count)) # sum of status_count = 27,258 (all Arriba)
+
+twin_arriba_contigency <- data.frame(
+  "validated_no" = c(twin_freq_arriba$status_count[1], twin_freq_arriba$status_count[2]),
+  "validated_yes" = c(twin_freq_arriba$status_count[3], twin_freq_arriba$status_count[4]),
+  row.names = c("twin_no", "twin_yes"),
+  stringsAsFactors = FALSE
+)
+
+chisq.test(twin_arriba_contigency)$observed
+chisq.test(twin_arriba_contigency)$expected
+
+chisq.test(twin_arriba_contigency)
+fisher.test(twin_arriba_contigency)
+```
+Arriba ensemble/twin chi-sq = 1139, p-value <2.2e-16
+
+## Ensemble chi-sq, STAR-Fusion
+```{r}
+twin_freq_sf <- all_fusion_data_filtered_valStatus_annotated %>% # all predictions validated or not were annotated
+  filter(program == "star-fusion") %>% # excludes "both" and "arriba"
+  group_by(discordant_read_support, twin) %>%
+  summarize(status_count = n(), .groups = "drop") %>%
+  mutate(freq = status_count / sum(status_count)) # sum of status_count = 5774 (all STAR-Fusion)
+
+twin_sf_contigency <- data.frame(
+  "validated_no" = c(twin_freq_sf$status_count[1], twin_freq_sf$status_count[2]),
+  "validated_yes" = c(twin_freq_sf$status_count[3], twin_freq_sf$status_count[4]),
+  row.names = c("twin_no", "twin_yes"),
+  stringsAsFactors = FALSE
+)
+
+chisq.test(twin_sf_contigency)$observed
+chisq.test(twin_sf_contigency)$expected
+
+chisq.test(twin_sf_contigency)
+
+fisher.test(twin_sf_contigency)
+```
+
+STAR-Fusion ensemble/twin chi-sq = 1019.2, p-value <2.2e-16
+
+# Percent validated per tissue per program
+## Function to create a df with percentage validated and percentage not-validated per tissue type
+```{r}
+validated_v_not <- function(predictions_df, program_name) {
+  df <- predictions_df %>%
+    filter(program == tolower(program_name)) %>%
+    group_by(tissueType) %>%
+    summarize(
+      notValidated_count = sum(discordant_read_support == "FALSE"),
+      # predicted but not validated
+      validated_count = sum(discordant_read_support == "TRUE"),
+      # discordant read support at minimum
+      .groups = "drop"
+    ) %>%
+    mutate(notValidatedFraction = (notValidated_count / (notValidated_count + validated_count))) %>% # predicted but not validated
+    mutate(validatedFraction = (validated_count / (notValidated_count + validated_count))) # predicted and validated
+
+  return(df)
+}
+```
+
+## Run the function for Arriba
+```{r}
+# Create df with percentage validated and percentage not-validated per tissue type
+val_v_not_arriba <-
+  validated_v_not(all_fusion_data_filtered_valStatus_annotated, "arriba")
+
+val_v_not_arriba
+
+# Sum the fractions of validated per tissue type then divide by number of tissues. Multiply by 100 to get the percent form
+val_per_tiss_avg_arriba <-
+  (sum(val_v_not_arriba$validatedFraction) / length(val_v_not_arriba$tissueType)) * 100
+
+val_per_tiss_avg_arriba
+```
+On average, 29.15% (round to 29%) of Arriba predictions per tissue type were validated with at least discordant read support
+
+## Run the function for STAR-Fusion
+```{r}
+# Create df with percentage validated and percentage not-validated per tissue type
+val_v_not_sf <-
+  validated_v_not(all_fusion_data_filtered_valStatus_annotated, "star-fusion")
+
+val_v_not_sf
+
+# Sum the fractions of validated per tissue type then divide by number of tissues. Multiply by 100 to get the percent form
+val_per_tiss_avg_sf <-
+  (sum(val_v_not_sf$validatedFraction) / length(val_v_not_arriba$tissueType)) * 100
+
+val_per_tiss_avg_sf
+```
+
+On average, 33.19% (round to 33%) of STAR-Fusion predictions per tissue type were validated with at least discordant read support
+
+# Figure 2 - Predicted fusions, discordant & breakpoint supported, and discordant supported
+
+## Function to create the df
+```{r}
+valType_frac_perTiss <- function(predictions_df, program_name) {
+  df <- predictions_df %>%
+    filter(program == tolower(program_name)) %>%
+    group_by(tissueType) %>%
+    summarize(
+      notVal_count = sum(discordant_read_support == "FALSE"), # predicted but not validated
+      discordantSupport_count = sum(discordant_read_support == "TRUE" & breakpoint_support == "FALSE"), # discordant read support ONLY (no breakpoint support)
+      discordant_and_breakpointSupport_count = sum(discordant_read_support == "TRUE" & breakpoint_support == "TRUE"), # discordant read support & breakpoint support
+      .groups = "drop"
+    ) %>%
+    mutate(tissueType = str_replace_all(tolower(tissueType), "_", " ") %>% # change tissue types to be lower case, swap underscores for spaces, then uppercase first letter
+      str_to_sentence()) %>%
+    mutate(tissueType = fct_rev(factor(tissueType))) %>% # so that when we switch axis in plot, it is still alphabetical
+    mutate(notValFraction = (notVal_count / (notVal_count + discordantSupport_count + discordant_and_breakpointSupport_count))) %>%
+    mutate(discordantFraction = (discordantSupport_count / (notVal_count + discordantSupport_count + discordant_and_breakpointSupport_count))) %>%
+    mutate(discordant_andBreakpointFraction = (discordant_and_breakpointSupport_count / (notVal_count + discordantSupport_count + discordant_and_breakpointSupport_count))) %>%
+    select(-notVal_count, -discordantSupport_count, -discordant_and_breakpointSupport_count) %>% # not necessary anymore
+    pivot_longer(
+      cols = ends_with("Fraction"),
+      names_to = "fraction_type",
+      values_to = "value"
+    ) %>%
+    mutate(fraction_type = factor(fraction_type, levels = c("discordant_andBreakpointFraction", "discordantFraction", "notValFraction"))) # so that the order of categories making up the bar makes visual sense
+
+  return(df)
+}
+```
+
+## Function to create the plot
+```{r}
+valType_frac_perTiss_plot <- function(valType_frac_perTiss_df, program_name) {
+  if (tolower(program_name) == "arriba") {
+    program_name <- str_to_sentence(tolower(program_name)) # this program_name isn't used to access df, but rather in title of plot!
+
+    notVal_color <- "#C3908C"
+    discord_color <- "#A45953"
+    discord_and_break_color <- "#931111"
+  }
+
+  if (tolower(program_name) == "star-fusion") { # again! program is officially called STAR-Fusion and that should be reflected in axis title
+    program_name <- "STAR-Fusion"
+
+    notVal_color <- "#8C8CB4"
+    discord_color <- "#52528E"
+    discord_and_break_color <- "#19196C"
+  }
+
+
+  plot <- ggplot(valType_frac_perTiss_df, aes(x = tissueType, y = value, fill = fraction_type)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    labs(x = "Tissue", y = paste(program_name, "- status fraction", sep = " ")) +
+    scale_fill_manual(
+      values = c(
+        "notValFraction" = notVal_color,
+        "discordant_andBreakpointFraction" = discord_and_break_color,
+        "discordantFraction" = discord_color
+      ),
+      name = "",
+      labels = c(
+        "notValFraction" = "Not Validated",
+        "discordant_andBreakpointFraction" = "Discordant read and breakpoint support",
+        "discordantFraction" = "Discordant read support only"
+      )
+    ) +
+    theme_minimal() +
+    theme(
+      panel.grid = element_blank(), # get rid of all gridlines
+      axis.line = element_line(color = "black"), # bring back the x & y axis line
+      axis.ticks = element_line(color = "black"), # bring back axis ticks
+      axis.text = element_text(color = "black")
+    ) # make axis tick labels black
+
+  return(plot)
+}
+```
+
+## Run the function - Arriba
+```{r}
+valType_frac_perTiss_arriba <- valType_frac_perTiss(all_fusion_data_filtered_valStatus_annotated, "arriba")
+valType_frac_perTiss_plot(valType_frac_perTiss_arriba, "arriba")
+
+# ggsave(
+#   "~/fusions/Figures/Figure_2/valType_frac_perTiss_arriba.pdf",
+#   plot = valType_frac_perTiss_plot(valType_frac_perTiss_arriba, "arriba"),
+#   width = 8,
+#   height = 8,
+#   units = "in"
+# )
+```
+
+## Run the function - STAR-Fusion
+```{r}
+valType_frac_perTiss_sf <- valType_frac_perTiss(all_fusion_data_filtered_valStatus_annotated, "star-fusion")
+valType_frac_perTiss_plot(valType_frac_perTiss_sf, "star-fusion")
+
+# ggsave(
+#   "~/fusions/Figures/Figure_2/valType_frac_perTiss_sf.pdf",
+#   plot = valType_frac_perTiss_plot(valType_frac_perTiss_sf, "star-fusion"),
+#   width = 8,
+#   height = 8,
+#   units = "in"
+# )
+```
+
+## Get the number of fusions per tissue per program, add to valType_frac_perTiss_plot manually
+```{r}
+n_fusionCounts <- all_fusion_data_filtered_valStatus_annotated %>%
+  group_by(tissueType, program) %>%
+  summarize(fusion_count = n(), .groups = "drop")
+```
+
+# Table 1 - summary of fusion transcript characteristics
+
+## Create a prepped df for the function
+```{r}
+table1_prep <- all_fusion_data_filtered_valStatus_annotated %>%
+  filter(program != "both") %>%
+  mutate(reading_frame = case_when(
+    (program == "arriba") ~ reading_frame_arriba,
+    (program == "star-fusion") ~ reading_frame_sf
+  )) %>%
+  mutate(transcriptionType = case_when(
+    (fiveprime_transcriptionType == "sense" & threeprime_transcriptionType == "sense") ~ "sense",
+    (fiveprime_transcriptionType == "antisense" | threeprime_transcriptionType == "antisense") ~ "antisense"
+  ))
+
+```
+
+## Create a function that returns 6 dfs in a list. One df for each category using the input dataset and the validated dataset
+```{r}
+table1_function <- function(prepped_df, program_name) {
+  
+  df_all <- prepped_df %>%
+    filter(program == program_name)
+  
+  df_val <- prepped_df %>%
+    filter(program == program_name) %>%
+    filter(discordant_read_support == "TRUE")
+  
+  readingFrame_func <- function(filtered_prepped_df) {
+    df <- filtered_prepped_df %>%
+      group_by(reading_frame) %>%
+      summarize(count = n(), .groups = "drop") %>%
+      mutate(freq = count/sum(count)) %>%
+      mutate(percentage = freq*100)
+    
+    return(df)
+  }
+  
+  transcriptionType_func <- function(filtered_prepped_df) {
+    df <- filtered_prepped_df %>%
+      group_by(transcriptionType) %>%
+      summarize(count = n(), .groups = "drop") %>%
+      mutate(freq = count/sum(count)) %>%
+      mutate(percentage = freq*100)
+    
+    return(df)
+  }
+  
+  confidence_func <- function(filtered_prepped_df) {
+    df <- filtered_prepped_df %>%
+      group_by(confidence_arriba) %>%
+      summarize(count = n(), .groups = "drop") %>%
+      mutate(freq = count/sum(count)) %>%
+      mutate(percentage = freq*100)
+    
+    return(df)
+  }
+  
+  df_readingFrame_all <- readingFrame_func(df_all)
+  df_readingFrame_val <- readingFrame_func(df_val)
+  
+  df_transcriptionType_all <- transcriptionType_func(df_all)
+  df_transcriptionType_val <- transcriptionType_func(df_val)
+  
+  df_confidence_all <- confidence_func(df_all)
+  df_confidence_val <- confidence_func(df_val)
+  
+  
+  return(list(
+    df_readingFrame_all = df_readingFrame_all,
+    df_readingFrame_val = df_readingFrame_val,
+    df_transcriptionType_all = df_transcriptionType_all,
+    df_transcriptionType_val = df_transcriptionType_val,
+    df_confidence_all = df_confidence_all,
+    df_confidence_val = df_confidence_val
+  ))
+}
+```
+
+## Run the function for Arriba
+```{r}
+arribaTable1 <- table1_function(table1_prep, "arriba")
+
+# Access the dfs
+arribaTable1$df_readingFrame_all
+arribaTable1$df_readingFrame_val
+
+arribaTable1$df_transcriptionType_all
+arribaTable1$df_transcriptionType_val
+
+arribaTable1$df_confidence_all
+arribaTable1$df_confidence_val
+```
+### Quick confidence level stats for Arriba
+```{r}
+arriba_lowConfPred_count <- arribaTable1$df_confidence_all[arribaTable1$df_confidence_all$confidence_arriba == "low", "count"]
+arriba_lowConfVal_count <- arribaTable1$df_confidence_val[arribaTable1$df_confidence_val$confidence_arriba == "low", "count"]
+
+paste0(
+  ((arriba_lowConfVal_count/arriba_lowConfPred_count)*100),
+  "%")
+
+
+arriba_highConfPred_count <- arribaTable1$df_confidence_all[arribaTable1$df_confidence_all$confidence_arriba == "high", "count"]
+arriba_highConfVal_count <- arribaTable1$df_confidence_val[arribaTable1$df_confidence_val$confidence_arriba == "high", "count"]
+
+paste0(
+  ((arriba_highConfVal_count/arriba_highConfPred_count)*100),
+  "%")
+```
+
+Confidence assessment:
+10,140 Arriba predictions were assigned "low confidence" and 1447 (14.27%, round to 14%) of those were validated
+9519 Arriba predictions were assigned "high confidence" and 5120 (53.79%, round to 54%) of those were validated
+
+
+## Run the function for STAR-Fusion
+```{r}
+sfTable1 <- table1_function(table1_prep, "star-fusion")
+
+# Access the dfs
+sfTable1$df_readingFrame_all
+sfTable1$df_readingFrame_val
+
+sfTable1$df_transcriptionType_all
+sfTable1$df_transcriptionType_val
+
+sfTable1$df_confidence_all
+sfTable1$df_confidence_val
+```
+
+# Accounting for alt-splicing, how many events in validated dataset?
+## Sanity check - do counts match what we expect based on annotation prep script?
+```{r}
+alt_splicing_check <- all_fusion_data_filtered_valStatus_annotated %>%
+  filter(program != "both" & discordant_read_support == "TRUE") %>% # 10997
+  filter(multi_alt_fusion_valOnly == "TRUE")
+
+
+nrow(altSplicing_instances_valOnly %>% filter(program == "arriba")) # 5202
+nrow(alt_splicing_check %>% filter(program == "arriba")) # 5202, sanity check passed
+
+
+nrow(altSplicing_instances_valOnly %>% filter(program == "star-fusion")) # 741
+nrow(alt_splicing_check %>% filter(program == "star-fusion")) # 741, sanity check passed
+
+
+nrow(alt_splicing_unique_valOnly) # 1802 unique alt-splicing regardless of program 
+
+alt_splicing_check_2 <- all_fusion_data_filtered_valStatus_annotated %>%
+  filter(program != "both" & discordant_read_support == "TRUE") %>% # 10997
+  select(fusion_name, geneID_fusionName, sampleID, multi_alt_fusion_valOnly) %>% # don't include program
+  filter(multi_alt_fusion_valOnly == "TRUE") %>%
+  distinct() # 1802
+```
+
+```{r}
+account_alt_splicing <- all_fusion_data_filtered_valStatus_annotated %>%
+  filter(program != "both" & discordant_read_support == "TRUE") %>% # 10997
+  select(fusion_name, geneID_fusionName, sampleID, program, multi_alt_fusion_valOnly, altSplicing_id_onlyVal) %>%
+  distinct() # drops to 7173, collapses instances of alt-splicing into 1 per program and sampleID AND includes the non-altspliced
+
+nrow(account_alt_splicing) # 7173
+nrow(account_alt_splicing %>% filter(!is.na(altSplicing_id_onlyVal))) # 2119 of the 7173 represent alternative splicing
+
+nrow(account_alt_splicing %>% filter(!is.na(altSplicing_id_onlyVal)) %>% filter(program == "arriba")) # 1788 Arriba, alt-spliced
+nrow(account_alt_splicing %>% filter(program == "arriba")) # 5339 Arriba total
+
+nrow(account_alt_splicing %>% filter(!is.na(altSplicing_id_onlyVal)) %>% filter(program == "star-fusion")) # 331 STAR-Fusion, alt-spliced
+nrow(account_alt_splicing %>% filter(program == "star-fusion")) # 1834 STAR-Fusion total
+
+alt_splicing_arriba_sanity <- account_alt_splicing %>%
+  filter(program == "arriba") %>%
+  select(geneID_fusionName, fusion_name, sampleID) %>%
+  distinct() # 5339
+
+alt_splicing_sf_sanity <- account_alt_splicing %>%
+  filter(program == "star-fusion") %>%
+  select(geneID_fusionName, sampleID) %>%
+  distinct() # 1834
+```
+Accounting for alternative splicing in the validated set, there are 7173 validated events in the dataset. 5339 Arriba predictions and 1834 STAR-Fusion predictions
+
+# Table 2 - annotation
+## Possible promoter swapping counts & frequency
+### Create a dataset with promoter swapping status which accounts for alt-splicing
+```{r, echo = FALSE}
+promoterSwap_accountAltSplcing <- all_fusion_data_filtered_valStatus_annotated %>%
+  # Keep only those validated and ones that have "arriba" or "star-fusion" listed in program! 
+  filter(program != "both" & discordant_read_support == "TRUE") %>% # 10997, "both" is there to show twins on one row, but the twins are also already represented in the sep arriba & star-fusion rows
+  
+  # Select only these cols and pull distinct combos to address alt-splicing
+  select(geneID_fusionName, program, sampleID, multi_alt_fusion_valOnly,  altSplicing_id_onlyVal, promoterSwapEventCandidate) %>%
+  distinct() %>% # 7272 (5428 Arriba, 1844 STAR-Fusion)! Need this to get down to 7173 to truly address alt-splicing. Some alt-spliced appear more than once because one instance is a promoter swapping event while the other isn't causing both to remain after doing "distinct"
+  
+  #
+  group_by(geneID_fusionName, program, sampleID, altSplicing_id_onlyVal) %>%
+  filter(
+    if (n() == 1) {
+      TRUE
+      } else { # this catches the situations where n == 2. After using distinct and with the selected cols and grouping. Either all instances of alt-splicing show promoter swap or no promoter-swap. OR, at least one instance of alt-splicing shows promoter swap while the others don't. 
+        if (any(promoterSwapEventCandidate == "TRUE")) promoterSwapEventCandidate == "TRUE" else TRUE # if a row appears more than once (same fusion pair, program, sampleID, altSplicing ID but different promoterSwapEventCandidate status), then keep the row that is "TRUE". If at least one instance of this fusion pair in this cell line predicted by this program is a promoter swapping event, then we are counting that towards the promoter swapping event total. 
+        }
+    ) %>% # dropped to 7173 total as needed to account for alt-splicing
+  ungroup() 
+```
+
+### Get the frequency of promoter swapping vs. not for each program in the alt-splicing accounted dataset (7173 event total)
+```{r}
+promoterSwap_count_freq <- promoterSwap_accountAltSplcing %>%
+  group_by(program, promoterSwapEventCandidate) %>%
+  summarize(count = n(), .groups = "drop") %>% # totals reflect 5339 Arriba & 1834 STAR-Fusion (7173 rows)
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  mutate(percentage = freq*100)
+
+promoterSwap_count_freq
+```
+
+## Involving kinases counts & frequency
+### Create a dataset with kinase status which accounts for alt-splicing
+```{r, echo = FALSE}
+kinase_accountAltSplcing <- all_fusion_data_filtered_valStatus_annotated %>%
+  # Keep only those validated and ones that have "arriba" or "star-fusion" listed in program! 
+  filter(program != "both" & discordant_read_support == "TRUE") %>% # 10997, "both" is there to show twins on one row, but the twins are also already represented in the sep arriba & star-fusion rows
+  select(geneID_fusionName, program, sampleID, multi_alt_fusion_valOnly,  altSplicing_id_onlyVal, fiveprime_kinase, threeprime_kinase) %>% 
+  distinct() %>% # 7178 (5344 Arriba, 1834 STAR-Fusion)! Can no-longer make any conclusion about reading frame though! Alt splicing could lead to different frames. Need this to get down to 7173 to truly address alt-splicing
+  mutate(status = case_when(
+    (fiveprime_kinase == "TRUE" &  threeprime_kinase == "FALSE") ~ "fivePrimeOnly",
+    (fiveprime_kinase == "FALSE" &  threeprime_kinase == "TRUE") ~ "threePrimeOnly",
+    (fiveprime_kinase == "TRUE" &  threeprime_kinase == "TRUE") ~ "Both"
+  )) %>%
+  select(-c("fiveprime_kinase", "threeprime_kinase")) %>%
+  distinct() %>% # still 7178
+  group_by(geneID_fusionName, program, sampleID, altSplicing_id_onlyVal) %>%
+  filter(
+    if (n() == 1) {
+      TRUE
+      } else {
+        if (any(!is.na(status))) !is.na(status) else TRUE
+ # if a row appears more than once (same fusion pair, program, sampleID, altSplicing ID but different kinase status BECAUSE THAT FUSION ID WASN'T INCLUDED IN OUR ANNOTATION SET SINCE IT WAS ANTISENSE), then keep the row that is NOT NA. This is because the fusion DOES include a kinase and clearly we have an instance of the fusion that is sense transcribed if "status" is NOT NA
+ }
+ ) %>% # dropped to 7173 total as needed to account for alt-splicing
+  mutate(involvesKinase = case_when(
+    (!is.na(status)) ~ "TRUE",
+    (is.na(status)) ~ "FALSE"
+  ))
+```
+
+### Get the frequency of involving kinase vs. not for each program in the alt-splicing accounted dataset (7173 event total)
+```{r}
+kinaseOverallFreq <- kinase_accountAltSplcing %>%
+  group_by(program, involvesKinase) %>%
+  summarize(count = n(), .groups = "drop") %>%
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  mutate(percentage = freq*100)
+
+kinaseOverallFreq
+```
+
+### Of the fusions involving kinases, get the frequency of each type per program in the alt-splicing accounted dataset
+```{r}
+kinasesOnly_typeFreq <- kinase_accountAltSplcing %>%
+  filter(!(is.na(status))) %>% # now that we have accounted for alt-splicing, keep only the ones that are kinases
+  group_by(program, status) %>%
+  summarize(count = n(), .groups = "drop") %>% # sanity check passed: reflects count total of 420 Arriba & 187 STAR-Fusion kinase fusions
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  mutate(percentage = freq*100)
+
+kinasesOnly_typeFreq
+```
+
+## Involving miRNA hosts counts & frequency
+### Create a dataset with miRNA status which accounts for alt-splicing
+```{r, echo = FALSE}
+miRNA_accountAltSplcing <- all_fusion_data_filtered_valStatus_annotated %>%
+  # Keep only those validated and ones that have "arriba" or "star-fusion" listed in program! 
+  filter(program != "both" & discordant_read_support == "TRUE") %>% # 10997, "both" is there to show twins on one row, but the twins are also already represented in the sep arriba & star-fusion rows
+  select(geneID_fusionName, program, sampleID, multi_alt_fusion_valOnly,  altSplicing_id_onlyVal, fiveprime_miRNA_host, threeprime_miRNA_host, threeprime_candidate_miRNA_host) %>% 
+
+  distinct() %>% # 7259 (5418 Arriba, 1841 STAR-Fusion)! Need this to get down to 7173 to truly address alt-splicing
+  mutate(involves_miRNA = case_when(
+    (fiveprime_miRNA_host == "TRUE" | threeprime_miRNA_host == "TRUE" | threeprime_candidate_miRNA_host == "TRUE") ~ "TRUE",
+    TRUE ~ "FALSE"
+    )) %>%
+  group_by(geneID_fusionName, program, sampleID, altSplicing_id_onlyVal) %>%
+  
+  # If a fusion in the grouping appears more than once, keep the instance where it shows that the fusion involves an miRNA
+  filter(
+    if (n() == 1) {
+      TRUE
+      } else {
+        if (any((involves_miRNA == "TRUE"))) involves_miRNA == "TRUE" else TRUE
+      }
+  ) %>%
+  
+  # There are 10 fusions that are n() > 1! They show up because depending on alt-splcing, 5' or 3' partner AND both the partners are hosts! Just keep the instance where both partners are listed as hosts. The grouping remains from previous filtering
+  filter(
+    if (n() > 1) {
+      (fiveprime_miRNA_host == "TRUE" & threeprime_miRNA_host == "TRUE")
+      } else {
+        TRUE
+      }
+  ) %>% # drops to 7173, good!
+  
+  ungroup() %>%
+  
+  # Add a column for the type! Which partner is a host?
+  mutate(status = case_when(
+    (fiveprime_miRNA_host == "TRUE" & threeprime_miRNA_host == "TRUE") ~ "bothHost",
+    (fiveprime_miRNA_host == "TRUE") ~ "fivePrimeHost",
+    (threeprime_miRNA_host == "TRUE") ~ "threePrimeHost",
+    (threeprime_candidate_miRNA_host == "TRUE") ~ "candidateHost"
+  ))
+```
+
+### Get the frequency of involving involving miRNA hosts vs. not for each program in the alt-splicing accounted dataset (7173 event total)
+```{r}
+miRNAOverallFreq <- miRNA_accountAltSplcing %>%
+  group_by(program, involves_miRNA) %>%
+  summarize(count = n(), .groups = "drop") %>% # totals reflect 5339 Arriba & 1834 STAR-Fusion (7173 rows)
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  mutate(percentage = freq*100)
+
+miRNAOverallFreq
+```
+
+### Of the fusions involving miRNA hosts, get the frequency of each type per program in the alt-splicing accounted dataset
+```{r}
+miRNAOnly_typeFreq <- miRNA_accountAltSplcing %>%
+  # lump threeprime candidate hosts with the 3' hosts
+  mutate(status = case_when( 
+    (threeprime_candidate_miRNA_host == "TRUE") ~ "threePrimeHost",
+    TRUE ~ status
+  )) %>%
+  mutate(threeprime_miRNA_host = case_when( 
+    (threeprime_candidate_miRNA_host == "TRUE") ~ "TRUE",
+    TRUE ~ threeprime_miRNA_host
+  )) %>%
+  select(-threeprime_candidate_miRNA_host) %>%
+  
+  filter(!(is.na(status))) %>% # now that we have accounted for alt-splicing, keep only the ones that involve miRNA hosts
+  group_by(program, status) %>%
+  summarize(count = n(), .groups = "drop") %>% # sanity check passed: reflects count total of 431 Arriba & 155 STAR-Fusion miRNA host fusions
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  mutate(percentage = freq*100)
+
+miRNAOnly_typeFreq
+```
+
+## Mitelman fusions counts & frequency
+### Create a dataset for Mitelman match status which accounts for alt-splicing
+```{r, echo = FALSE}
+mitelman_accountAltSplcing <- all_fusion_data_filtered_valStatus_annotated %>%
+  # Keep only those validated and ones that have "arriba" or "star-fusion" listed in program! 
+  filter(program != "both" & discordant_read_support == "TRUE") %>% # 10997, "both" is there to show twins on one row, but the twins are also already represented in the sep arriba & star-fusion rows
+  select(geneID_fusionName, program, sampleID, multi_alt_fusion_valOnly,  altSplicing_id_onlyVal, mitelmanFusion_match, mitelman_tissueTypes, mitelman_tissue_match) %>% 
+  distinct() %>% # 7183 (5349 Arriba, 1834 STAR-Fusion)! Need this to get down to 7173 to truly address alt-splicing! This is occuring because some 
+  group_by(geneID_fusionName, program, sampleID, altSplicing_id_onlyVal) %>%
+  filter(
+    if (n() == 1) {
+      TRUE
+      } else {
+        if (any((mitelmanFusion_match == "TRUE"))) mitelmanFusion_match == "TRUE" else TRUE
+  }
+ ) %>% # dropped to 7173 total as needed to account for alt-splicing
+  # if a row appears more than once (same fusion pair, program, sampleID, altSplicing ID but different mitelman status it is BECAUSE THAT FUSION ID WASN'T INCLUDED IN OUR ANNOTATION SET SINCE IT WAS ANTISENSE), then keep the row that is NOT "FALSE". This is because we do have sense version of the fusion that DOES have a Mitelman match
+  ungroup()
+```
+
+### Get the frequency of Mitelman database match vs. not for each program in the alt-splicing accounted dataset (7173 event total)
+```{r}
+mitelmanOverallFreq <- mitelman_accountAltSplcing %>%
+  group_by(program, mitelmanFusion_match) %>%
+  summarize(count = n(), .groups = "drop") %>% # totals reflect 5339 Arriba & 1834 STAR-Fusion (7173 rows)
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  mutate(percentage = freq*100)
+
+mitelmanOverallFreq
+```
+558 or 10.45% (round to 10%) of Arriba validations have a match in Mitelman
+380 or 20.72% (round to 21%) of STAR-Fusion validations have a match in Mitelman
+
+### Of the fusions with a Mitelman database match, get the frequency of each type per program in the alt-splicing accounted dataset
+```{r}
+mitelmanOnly_typeFreq <- mitelman_accountAltSplcing %>%
+  filter(mitelmanFusion_match == "TRUE") %>% # now that we have accounted for alt-splicing, keep only the ones that are Mitelman matches
+  group_by(program, mitelman_tissue_match) %>%
+  summarize(count = n(), .groups = "drop") %>% # sanity check passed: reflects count total of 558 Arriba & 380 STAR-Fusion miRNA host fusions
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  mutate(percentage = freq*100)
+
+mitelmanOnly_typeFreq
+```
+
+## TumorFusions fusions counts & frequency
+### Create a dataset for TumorFusions match status which accounts for alt-splicing
+```{r, echo = FALSE}
+tf_accountAltSplcing <- all_fusion_data_filtered_valStatus_annotated %>%
+  # Keep only those validated and ones that have "arriba" or "star-fusion" listed in program! 
+  filter(program != "both" & discordant_read_support == "TRUE") %>% # 10997, "both" is there to show twins on one row, but the twins are also already represented in the sep arriba & star-fusion rows
+  select(geneID_fusionName, program, sampleID, multi_alt_fusion_valOnly,  altSplicing_id_onlyVal, tf_match, tf_disease, tf_tissueType, tf_tissue_match, tf_hg19_fiveprime_fusion_junction,
+         tf_fiveprime_exactOrNear_juncMatch, tf_hg19_threeprime_fusion_junction, tf_threeprime_exactOrNear_juncMatch, tf_position_consistency, tf_frame_prediction) %>%
+  distinct() %>% # 7330 (5474 Arriba, 1856 STAR-Fusion)! Need this to get down to 7173 to truly address alt-splicing! This is occurring because some
+  select(-c("tf_hg19_fiveprime_fusion_junction", "tf_fiveprime_exactOrNear_juncMatch", "tf_hg19_threeprime_fusion_junction", "tf_threeprime_exactOrNear_juncMatch")) %>%   # deselect these columns! possible that one alternatively spliced variant has a near junction match but the other doesn't
+  distinct() %>% # drops to 7179, still need to get to 7173
+  group_by(geneID_fusionName, program, sampleID, altSplicing_id_onlyVal) %>%
+  filter(
+    if (n() == 1) {
+      TRUE
+      } else {
+        if (any((tf_match == "TRUE"))) tf_match == "TRUE" else TRUE
+  }
+ ) %>% # dropped to 7173 total as needed to account for alt-splicing
+  # if a row appears more than once (same fusion pair, program, sampleID, altSplicing ID but different tf_match status it is BECAUSE THAT FUSION ID WASN'T INCLUDED IN OUR ANNOTATION SET SINCE IT WAS ANTISENSE), then keep the row that is NOT "FALSE". This is because we do have sense version of the fusion that DOES have a TF match
+  ungroup()
+
+```
+
+### Get the frequency of TumorFusions match vs. not for each program in the alt-splicing accounted dataset (7173 event total)
+```{r}
+tfOverallFreq <- tf_accountAltSplcing %>%
+  group_by(program, tf_match) %>%
+  summarize(count = n(), .groups = "drop") %>% # totals reflect 5339 Arriba & 1834 STAR-Fusion (7173 rows)
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  mutate(percentage = freq*100)
+
+tfOverallFreq
+```
+291 or 5.45% (round to 5%) of Arriba validations have a match in TCGA
+181 or 9.87% (round to 10%) of STAR-Fusion validations have a match in TCGA
+
+### Of the fusions with a TumorFusions match, get the frequency of each type per program in the alt-splicing accounted dataset
+```{r}
+tfOnly_typeFreq <- tf_accountAltSplcing %>%
+  filter(tf_match == "TRUE") %>% # now that we have accounted for alt-splicing, keep only the ones that are TF matches
+  group_by(program, tf_tissue_match) %>%
+  summarize(count = n(), .groups = "drop") %>% # sanity check passed: reflects count total of 291 Arriba & 181 STAR-Fusion miRNA host fusions
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  mutate(percentage = freq*100)
+
+tfOnly_typeFreq
+```
+
+## TCGA - FusionCatcher validations fusions counts & frequency
+### Create a dataset for TCGA - FusionCatcher validations match status which accounts for alt-splicing
+```{r, echo = FALSE}
+tcga_accountAltSplcing <- all_fusion_data_filtered_valStatus_annotated %>%
+  # Keep only those validated and ones that have "arriba" or "star-fusion" listed in program! 
+  filter(program != "both" & discordant_read_support == "TRUE") %>% # 10997, "both" is there to show twins on one row, but the twins are also already represented in the sep arriba & star-fusion rows
+  select(geneID_fusionName, program, sampleID, multi_alt_fusion_valOnly,  altSplicing_id_onlyVal, tcga_match, tcga_cancer_type, tcga_tissueType, tcga_tissue_match,
+         tcga_hg38_fiveprime_fusion_junction, tcga_fiveprime_exactOrNear_juncMatch, tcga_hg38_threeprime_fusion_junction, tcga_threeprime_exactOrNear_juncMatch) %>%
+  distinct() %>% # 7194 (5356 Arriba, 1838 STAR-Fusion)! Need this to get down to 7173 to truly address alt-splicing! This is occuring because some
+  select(-c("tcga_hg38_fiveprime_fusion_junction", "tcga_fiveprime_exactOrNear_juncMatch", "tcga_hg38_threeprime_fusion_junction", "tcga_threeprime_exactOrNear_juncMatch")) %>%   # deselect these columns! possible that one alternatively spliced variant has a near junction match but the other doesn't
+  distinct() %>% # drops to 71797, still need to get to 7173
+  group_by(geneID_fusionName, program, sampleID, altSplicing_id_onlyVal) %>%
+  filter(
+    if (n() == 1) {
+      TRUE
+      } else {
+        if (any((tcga_match == "TRUE"))) tcga_match == "TRUE" else TRUE
+  }
+ ) %>% # dropped to 7173 total as needed to account for alt-splicing
+  # if a row appears more than once (same fusion pair, program, sampleID, altSplicing ID but different tcga_match status it is BECAUSE THAT FUSION ID WASN'T INCLUDED IN OUR ANNOTATION SET SINCE IT WAS ANTISENSE), then keep the row that is NOT "FALSE". This is because we do have sense version of the fusion that DOES have a TCGA match
+  ungroup()
+```
+
+### Get the frequency of TCGA - FusionCatcher validations match vs. not for each program in the alt-splicing accounted dataset (7173 event total)
+```{r}
+tcgaOverallFreq <- tcga_accountAltSplcing %>%
+  group_by(program, tcga_match) %>%
+  summarize(count = n(), .groups = "drop") %>% # totals reflect 5339 Arriba & 1834 STAR-Fusion (7173 rows)
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  mutate(percentage = freq*100)
+
+tcgaOverallFreq
+```
+### Of the fusions with a TCGA - FusionCatcher validations match, get the frequency of each type per program in the alt-splicing accounted dataset
+```{r}
+tcgaOnly_typeFreq <- tcga_accountAltSplcing %>%
+  filter(tcga_match == "TRUE") %>% # now that we have accounted for alt-splicing, keep only the ones that are TCGA matches
+  group_by(program, tcga_tissue_match) %>%
+  summarize(count = n(), .groups = "drop") %>% # sanity check passed: reflects count total of 59 Arriba & 34 STAR-Fusion miRNA host fusions
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  mutate(percentage = freq*100)
+
+tcgaOnly_typeFreq
+```
+## CGC fusions counts & frequency
+### Create a dataset for CGC match status which accounts for alt-splicing
+```{r, echo = FALSE}
+cgc_accountAltSplcing <- all_fusion_data_filtered_valStatus_annotated %>%
+  # Keep only those validated and ones that have "arriba" or "star-fusion" listed in program! 
+  filter(program != "both" & discordant_read_support == "TRUE") %>% # 10997, "both" is there to show twins on one row, but the twins are also already represented in the sep arriba & star-fusion rows
+  select(geneID_fusionName, program, sampleID, multi_alt_fusion_valOnly,  altSplicing_id_onlyVal, contains("cgc")) %>%
+  distinct() %>% # 7177 (5343 Arriba, 1834 STAR-Fusion)! Need this to get down to 7173 to truly address alt-splicing! This is occuring because some
+  group_by(geneID_fusionName, program, sampleID, altSplicing_id_onlyVal) %>%
+  filter(
+    if (n() == 1) {
+      TRUE
+      } else {
+        if (any((cgc_fiveprime_gene == "TRUE" | cgc_threeprime_gene == "TRUE"))) (cgc_fiveprime_gene == "TRUE" | cgc_threeprime_gene == "TRUE") else TRUE
+  }
+ ) %>% # dropped to 7173 total as needed to account for alt-splicing
+  # if a row appears more than once (same fusion pair, program, sampleID, altSplicing ID but different cgc_fiveprime_gene/cgc_threeprime_gene status it is BECAUSE THAT FUSION PARTNER WASN'T INCLUDED IN OUR ANNOTATION SET SINCE IT WAS ANTISENSE), then keep the row that is NOT "FALSE". This is because we do have sense version of the fusion that DOES have a CGC match
+  mutate(status = case_when(
+    (cgc_fiveprime_gene == "TRUE" &  cgc_threeprime_gene == "FALSE") ~ "fivePrimeOnly",
+    (cgc_fiveprime_gene == "FALSE" &  cgc_threeprime_gene == "TRUE") ~ "threePrimeOnly",
+    (cgc_fiveprime_gene == "TRUE" &  cgc_threeprime_gene == "TRUE") ~ "Both"
+    )) %>%
+  mutate(involvesCGC = case_when(
+    (!is.na(status)) ~ "TRUE",
+    (is.na(status)) ~ "FALSE"
+  )) %>%
+  ungroup()
+```
+
+### Get the frequency of CGC match vs. not for each program in the alt-splicing accounted dataset (7173 event total)
+```{r}
+cgcOverallFreq <- cgc_accountAltSplcing %>%
+  group_by(program, involvesCGC) %>%
+  summarize(count = n(), .groups = "drop") %>% # totals reflect 5339 Arriba & 1834 STAR-Fusion (7173 rows)
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  mutate(percentage = freq*100)
+
+cgcOverallFreq
+```
+745 or 13.95% (round to 14%) of Arriba validations involved a CGC gene
+281 or 15.32% (round to 15%) of STAR-Fusion validations involved a CGC gene
+
+### Of the fusions with a CGC match, get the frequency of each type per program in the alt-splicing accounted dataset
+```{r}
+cgcOnly_typeFreq <- cgc_accountAltSplcing %>%
+  filter(involvesCGC == "TRUE") %>% # now that we have accounted for alt-splicing, keep only the ones that are CGC matches
+  group_by(program, status) %>%
+  summarize(count = n(), .groups = "drop") %>% # sanity check passed: reflects count total of 745 Arriba & 281 STAR-Fusion miRNA host fusions
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  mutate(percentage = freq*100)
+
+cgcOnly_typeFreq
+```
+
+# Alt-splicing, contingency and Fisher
+Objective: for fusions appearing to be alternatively spliced in the input dataset (multi_alt_fusion_allPred == "TRUE"), how many of those instances validated at least once in the validated dataset. If one instance of the same alt-spliced fusion (in a sample and by a program) is validated and another is not, the count for that instance should go towards "alt splice = yes, validated = yes"
+
+## Alt-splicing contigency prep, collapsed
+
+### Alt-splicing contigency prep, collapsed (ALT NO)
+```{r}
+alt_no_collapsed <- all_fusion_data_filtered_valStatus_annotated %>%
+  filter(program != "both") %>% # 33032
+  select(fusion_name, geneID_fusionName, sampleID, program, discordant_read_support, multi_alt_fusion_allPred) %>%
+  distinct() %>% # drops to 24134
+  filter(multi_alt_fusion_allPred == "FALSE") # drops to 18332
+  # select(-discordant_read_support) %>%
+  # distinct() # still 18332 so discordant read status doesn't effect
+
+alt_no_val_no_collapsed <- alt_no_collapsed %>%
+  filter(discordant_read_support == "FALSE") %>%
+  select(fusion_name, geneID_fusionName, sampleID, program) %>%
+  distinct() # 13499 (10766 Arriba & 2733 STAR-Fusion)
+
+alt_no_val_yes_collapsed <- alt_no_collapsed %>%
+  filter(discordant_read_support == "TRUE") %>%
+  select(fusion_name, geneID_fusionName, sampleID, program) %>%
+  distinct() # 4833 (3349 Arriba & 1484 STAR-Fusion)
+
+# Sanity check
+alt_splicing_freq_b4val
+
+alt_splicing_freq_b4val[alt_splicing_freq_b4val$program == "arriba" & alt_splicing_freq_b4val$multi_alt_fusion_allPred == "FALSE", "status_count"] + # Arriba, input dataset, not alt-spliced
+  alt_splicing_freq_b4val[alt_splicing_freq_b4val$program == "star-fusion" & alt_splicing_freq_b4val$multi_alt_fusion_allPred == "FALSE", "status_count"] # STAR-Fusion, input dataset, not alt-spliced
+
+# 18332!
+
+nrow(alt_no_collapsed) # 18332, sanity check passed!
+```
+
+### Alt-splicing contigency prep, collapsed (ALT YES)
+```{r}
+alt_yes_collapsed <- all_fusion_data_filtered_valStatus_annotated %>%
+  filter(program != "both") %>% # 33032
+  select(fusion_name, geneID_fusionName, sampleID, program, discordant_read_support, multi_alt_fusion_allPred) %>%
+  distinct() %>% # drops to 24134
+  filter(multi_alt_fusion_allPred == "TRUE") %>% # drops to 5802
+  # select(-discordant_read_support) %>%
+  # distinct() # drops to 5416, so discordant read status DOES affect
+  group_by(fusion_name, geneID_fusionName, program, sampleID, multi_alt_fusion_allPred) %>%
+  filter(
+    if (n() == 1) {
+      TRUE
+    } else { # this catches the situations where some cases of an alt-spliced fusion (from the original input set) are validated and others are not.
+      if (any(discordant_read_support == "TRUE")) discordant_read_support == "TRUE" else TRUE # if a row appears more than once (same fusion pair, program, sampleID, multi_alt_fusion_allPred but different validation status), then keep the row that is "TRUE". If at least one instance of this fusion pair in this cell line predicted by this program is validated, then we are counting it towards the alt_yes_val_yes category
+    }
+  ) %>% # dropped to 5416 total as expected from the commented out sanity check above
+  ungroup() 
+
+alt_yes_val_no_collapsed <- alt_yes_collapsed %>%
+  filter(discordant_read_support == "FALSE") %>%
+  select(fusion_name, geneID_fusionName, sampleID, program) %>%
+  distinct() # 3076 (2722 Arriba & 354 STAR-Fusion)
+
+alt_yes_val_yes_collapsed <- alt_yes_collapsed %>%
+  filter(discordant_read_support == "TRUE") %>%
+  select(fusion_name, geneID_fusionName, sampleID, program) %>%
+  distinct() # 2340 (1990 Arriba & 350 STAR-Fusion)
+
+# Sanity check
+alt_splicing_freq_b4val
+
+alt_splicing_freq_b4val[alt_splicing_freq_b4val$program == "arriba" & alt_splicing_freq_b4val$multi_alt_fusion_allPred == "TRUE", "status_count"] + # Arriba, input dataset, not alt-spliced
+  alt_splicing_freq_b4val[alt_splicing_freq_b4val$program == "star-fusion" & alt_splicing_freq_b4val$multi_alt_fusion_allPred == "TRUE", "status_count"] # STAR-Fusion, input dataset, not alt-spliced
+
+# 5416!
+
+nrow(alt_yes_collapsed) # 5416, sanity check passed!
+```
+
+## Alt-splicing contigency prep, NOT collapsed
+
+### Alt-splicing contigency prep, NOT collapsed (ALT NO)
+```{r}
+alt_no_notCollapsed <- all_fusion_data_filtered_valStatus_annotated %>%
+  filter(program != "both") %>% # 33032
+  select(fusion_name, geneID_fusionName, sampleID, program, discordant_read_support, multi_alt_fusion_allPred) %>%
+  #distinct() %>% # 24134, DON'T PULL DISTINCT (doesn't make a difference for alt no, but still don't do it on the principle of "not collapsed")
+  filter(multi_alt_fusion_allPred == "FALSE") # drops to 18332
+  # select(-discordant_read_support) %>%
+  # distinct() # still 18332 so discordant read status doesn't effect
+
+alt_no_val_no_notCollapsed <- alt_no_notCollapsed %>%
+  filter(discordant_read_support == "FALSE") %>%
+  select(fusion_name, geneID_fusionName, sampleID, program) # 13499 (10766 Arriba & 2733 STAR-Fusion)
+  # distinct(), don't pull distinct on principle (still 13499 if you do!)
+
+alt_no_val_yes_notCollapsed <- alt_no_notCollapsed %>%
+  filter(discordant_read_support == "TRUE") %>%
+  select(fusion_name, geneID_fusionName, sampleID, program) # 4833 (3349 Arriba & 1484 STAR-Fusion)
+  # distinct(), don't pull distinct on principle (still 13499 if you do!) 
+```
+
+### Alt-splicing contigency prep, NOT collapsed (ALT YES)
+```{r}
+alt_yes_notCollapsed <- all_fusion_data_filtered_valStatus_annotated %>%
+  filter(program != "both") %>% # 33032
+  select(fusion_name, geneID_fusionName, sampleID, program, discordant_read_support, multi_alt_fusion_allPred) %>%
+  #distinct() %>% # 24134, DON'T PULL DISTINCT (doesn't make a difference for alt no, but still don't do it on the principle of "not collapsed")
+  filter(multi_alt_fusion_allPred == "TRUE")# drops to 14700
+  # select(-discordant_read_support) %>%
+  # distinct() # drops to 5416, so discordant read status DOES affect BUT AGAIN, we are not pulling distinct here
+
+alt_yes_val_no_notCollapsed <- alt_yes_notCollapsed %>%
+  filter(discordant_read_support == "FALSE") %>% # 8536
+  select(fusion_name, geneID_fusionName, sampleID, program) 
+  # distinct() # 3462 (3087 Arriba & 375 STAR-Fusion), BUT DO NOT PULL DISTINCT (will still have overlap with alt_yes_val_yes anyways because we didn't account for it in alt_yes_notCollapsed)! NOT COLLAPSED
+
+alt_yes_val_yes_notCollapsed <- alt_yes_notCollapsed %>%
+  filter(discordant_read_support == "TRUE") %>% # 6164
+  select(fusion_name, geneID_fusionName, sampleID, program)
+  # distinct() # 2340 (1990 Arriba & 350 STAR-Fusion), BUT DO NOT PULL DISTINCT! NOT COLLAPSED
+```
+
+## Function to create contingency tables
+```{r}
+alt_contigency_func <- function(alt_no_val_no_df, alt_yes_val_no_df, alt_no_val_yes_df, alt_yes_val_yes_df, program_name) {
+  
+  cont_table <- data.frame(
+    "validated_no" = c(nrow(alt_no_val_no_df %>% filter(program == tolower(program_name))), nrow(alt_yes_val_no_df %>% filter(program == tolower(program_name)))),
+    "validated_yes" = c(nrow(alt_no_val_yes_df %>% filter(program == tolower(program_name))), nrow(alt_yes_val_yes_df %>% filter(program == tolower(program_name)))),
+    row.names = c("altSplice_no", "altSplice_yes"),
+    stringsAsFactors = FALSE
+  )
+    
+    return(cont_table)
+}
+```
+
+## Create the contigency tables
+```{r}
+altSplice_contigency_arriba_collapsed <- alt_contigency_func(alt_no_val_no_collapsed, alt_yes_val_no_collapsed, alt_no_val_yes_collapsed, alt_yes_val_yes_collapsed, "arriba")
+
+altSplice_contigency_sf_collapsed <- alt_contigency_func(alt_no_val_no_collapsed, alt_yes_val_no_collapsed, alt_no_val_yes_collapsed, alt_yes_val_yes_collapsed, "star-fusion")
+
+altSplice_contigency_arriba_notCollapsed <- alt_contigency_func(alt_no_val_no_notCollapsed, alt_yes_val_no_notCollapsed, alt_no_val_yes_notCollapsed, alt_yes_val_yes_notCollapsed, "arriba")
+
+altSplice_contigency_sf_notCollapsed <- alt_contigency_func(alt_no_val_no_notCollapsed, alt_yes_val_no_notCollapsed, alt_no_val_yes_notCollapsed, alt_yes_val_yes_notCollapsed, "star-fusion")
+```
+
+## Run the Fisher tests
+### Fisher tests for collapsed
+```{r}
+fisher.test(altSplice_contigency_arriba_collapsed)
+```
+Arriba alt-splicing (Fisher's exact test): there was a statistically significant association between being alternative splicing candidates and pipeline validation (p-value: < 2.2e-16)
+
+```{r}
+fisher.test(altSplice_contigency_sf_collapsed)
+```
+STAR-Fusion alt-splicing (Fisher's exact test): there was a statistically significant association between being alternative splicing candidates and pipeline validation (p-value: 3.497e-13)
+
+### Fisher tests for NOT collapsed
+```{r}
+fisher.test(altSplice_contigency_arriba_notCollapsed)
+```
+Arriba alt-splicing (Fisher's exact test): there was a statistically significant association between being alternative splicing candidates and pipeline validation (p-value: < 2.2e-16)
+
+```{r}
+fisher.test(altSplice_contigency_sf_notCollapsed)
+```
+STAR-Fusion alt-splicing (Fisher's exact test): there was a statistically significant association between being alternative splicing candidates and pipeline validation (p-value: < 2.2e-16)
+
+
+
+
+
+
+
+
+
+
+
+# Figure 3 - Kinase group distribution per tissue type
+## Prep a df for the figure
+```{r}
+fig3_prep <- all_fusion_data_filtered_valStatus_annotated %>%
+  filter(program != "both" & discordant_read_support == "TRUE") %>% # 10997, "both" is there to show twins on one row, but the twins are also already represented in the sep arriba & star-fusion rows
+  select(fusion_name, geneID_fusionName, program, sampleID, tissueType,  multi_alt_fusion_valOnly,  altSplicing_id_onlyVal, promoterSwapEventCandidate, fiveprime_kinase, threeprime_kinase, fiveprime_inFrame_kinase,
+         threeprime_inFrame_kinase, fiveprime_kinase_group, threeprime_kinase_group) %>% 
+  distinct() %>% # 7628 (5496 Arriba, 1857 STAR-Fusion)! Alt splicing could lead to different frames. Need this to get down to 7173 to truly address alt-splicing
+  
+  # Create a column acknowleding if an in-frame kinase is involved
+  mutate(inFrameKinaseInvolved = case_when(
+    ((fiveprime_kinase == "TRUE" & fiveprime_inFrame_kinase == "TRUE") | (threeprime_kinase == "TRUE" & threeprime_inFrame_kinase == "TRUE")) ~ "TRUE",
+    ((fiveprime_kinase == "TRUE" & (fiveprime_inFrame_kinase == "FALSE" | fiveprime_inFrame_kinase == "FRAME_UNKNOWN")) |
+       (threeprime_kinase == "TRUE" & (threeprime_inFrame_kinase == "FALSE" | threeprime_inFrame_kinase == "FRAME_UNKNOWN"))) ~ "FALSE",
+    (fiveprime_kinase == "FALSE" & threeprime_kinase == "FALSE") ~ NA
+    )) %>%
+  
+  mutate(promoterSwapThreePrimeKinaseInvolved = case_when(
+    (inFrameKinaseInvolved == "FALSE" & promoterSwapEventCandidate == "TRUE" & threeprime_kinase == "TRUE") ~ "TRUE",
+    (inFrameKinaseInvolved == "FALSE" & promoterSwapEventCandidate == "TRUE" & threeprime_kinase == "FALSE") ~ "FALSE",
+    (inFrameKinaseInvolved == "FALSE" & promoterSwapEventCandidate == "FALSE") ~ "FALSE",
+    (inFrameKinaseInvolved == "TRUE") ~ "FALSE",
+    (fiveprime_kinase == "FALSE" & threeprime_kinase == "FALSE") ~ NA
+    )) %>%
+
+  select(-fiveprime_inFrame_kinase, -threeprime_inFrame_kinase, -promoterSwapEventCandidate) %>% # no loner need these cols
+  distinct() %>% # drops to 7248! Ones with "FRAME_UNKNOWN" for one instance of the fusion and "FALSE" for another instance will collapse down into inFrameKinaseInvolved == "FALSE"
+  
+  mutate(inFrame_kinase_group = case_when(
+    (inFrameKinaseInvolved == "TRUE" & !(is.na(fiveprime_kinase_group)) & is.na(threeprime_kinase_group))  ~ fiveprime_kinase_group, # if only 5' partner is kinase, then put the 5' kinase group in the group col
+    (inFrameKinaseInvolved == "TRUE" & is.na(fiveprime_kinase_group) & !(is.na(threeprime_kinase_group)))  ~ threeprime_kinase_group, # if only 3' partner is kinase, then put the 3' kinase group in the group col
+    (inFrameKinaseInvolved == "TRUE" & !(is.na(threeprime_kinase_group)) & !is.na(fiveprime_kinase_group)) ~ paste(fiveprime_kinase_group, threeprime_kinase_group, sep = ","), # if both the 5' and 3' partner is kinase, then put both in group col
+    .default = NA # when neither 5' nor 3' partner of an in-frame fusion is a kinase
+    )) %>%
+  
+  select(-fiveprime_kinase_group, threeprime_kinase_group) %>%
+  distinct() %>% # still 7248 as expected
+  
+  # Add a status column to quickly filter out situations where a fusion is annotated as a kinase because it was sense transcribed, but another of the same fusion pair (w/ same program & sample ID) was not because it wasn't inluded in the sense annotation set
+  mutate(status = case_when(
+    (fiveprime_kinase == "TRUE" |  threeprime_kinase == "TRUE") ~ "kinase_involved",
+    (fiveprime_kinase == "FALSE" & threeprime_kinase == "FALSE") ~ "kinase_not_involved"
+  )) %>%
+  
+  group_by(fusion_name, geneID_fusionName, program, sampleID, altSplicing_id_onlyVal) %>%
+  filter(
+    if (n() == 1) {
+      TRUE
+      } else {
+        if (any((status == "kinase_involved"))) status == "kinase_involved" else TRUE
+         # if a row appears more than once (same fusion pair, program, sampleID, altSplicing ID but different kinase status BECAUSE THAT FUSION ID WASN'T INCLUDED IN OUR ANNOTATION SET SINCE IT WAS ANTISENSE), then keep the row that is kinase_involved This is because the fusion DOES include a kinase and clearly we have an instance of the fusion that is sense transcribed if "status" is NOT NA
+        }
+    ) %>% # dropped to 7243
+  
+  # Now filter for instances where the same KINASE fusion pair (w/ same program & sample ID) has in out-of-frame/unknown transcribed in an instance BUT also in-frame transcribed in another
+  filter(
+    if (n() == 1) {
+      TRUE
+      } else {
+        if (any((inFrameKinaseInvolved == "TRUE"))) inFrameKinaseInvolved == "TRUE" else TRUE
+        # if a row appears more than once (same fusion pair, program, sampleID, altSplicing ID but different inFrameKinaseInvolved status because at least one instance was in-frame but others were not in-frame), then keep the row that is in-frame! This is because the fusion DOES 
+        }
+    ) %>% # dropped to 7177
+  
+  # Now filter for instances where the same KINASE fusion pair (w/ same program & sample ID) has a promoter swapping instance BUT also a non-promoter swapping isntance
+  filter(
+    if (n() == 1) {
+      TRUE
+      } else {
+        if (any((promoterSwapThreePrimeKinaseInvolved == "TRUE"))) promoterSwapThreePrimeKinaseInvolved == "TRUE" else TRUE
+        # if a row appears more than once (same fusion pair, program, sampleID, altSplicing ID but different inFrameKinaseInvolved status because at least one instance was in-frame but others were not in-frame), then keep the row that is in-frame! This is because the fusion DOES 
+        }
+    ) %>% # dropped to 7173 total as needed to account for alt-splicing
+  ungroup()
+```
+
+## Create a function to make count dataframes for kinase groups & tissues
+```{r}
+kinase_group_tissue_func <- function(figure_3_preppedDF, program_name) {
+  
+  if (tolower(program_name) == "arriba") {
+      special_case <- NULL
+    }
+  
+  if (tolower(program_name) == "star-fusion") { # again! program is officially called STAR-Fusion and that should be reflected in axis title
+      special_case <- list(tissueType = "SMALL_INTESTINE", inFrame_kinase_group = NA_character_, count = 0)
+    }
+  
+  
+  df <- figure_3_preppedDF %>%
+    filter(program == tolower(program_name)) %>%
+    separate_rows(inFrame_kinase_group, sep = ",") %>% # for Arriba there are 4 fusion pairs where both partners are kinases so we separate these into 8 rows, SF there are 3 fusion pairs like this which we separate into 8 rows
+    distinct() %>% # sanity check, doesn't change
+    group_by(tissueType, inFrame_kinase_group) %>%
+    summarize(count = n(), .groups = "drop") %>% # displays count of kinase group per tissue
+    bind_rows(special_case) %>%
+    mutate(tissueType = str_replace_all(tolower(tissueType), "_", " ") %>% # change tissue types to be lower case, swap underscores for spaces, then uppercase first letter
+             str_to_sentence()) %>%
+    mutate(count = case_when( 
+      !(is.na(inFrame_kinase_group)) ~ count, # if there is a kinase group listed, then the count should stay the same
+      (is.na(inFrame_kinase_group)) ~ 0 # if there is no kinase group listed, change the count to 0! This way even tissues without kinases/in-frame kinases will show up
+      )) %>%
+    ungroup() %>%
+    group_by(tissueType) %>% # group by tissue
+    mutate(total_count_perTiss = sum(count)) %>% # create a column with the total counts for the tissue
+    ungroup() %>%
+    mutate(tissueType = fct_rev(factor(tissueType))) %>% # make tissue types as.factor but reverse (so Z-A instead of A-Z). Then when we plot and do coord_flip it will appear A-Z
+    select(-total_count_perTiss) # unnecessary now
+  
+  return(df)
+}
+```
+
+## Run the function for each program to make the dfs that figure 3 is based on
+```{r}
+arriba_fig3_df <- kinase_group_tissue_func(fig3_prep, "arriba")
+```
+
+```{r}
+sf_fig3_df <- kinase_group_tissue_func(fig3_prep, "star-fusion") 
+```
+
+## Create and save the plots for fig 3
+```{r}
+arriba_fig3_plot <- ggplot(arriba_fig3_df, aes(x=tissueType, y=count, fill=inFrame_kinase_group)) + 
+  geom_bar(stat = "identity") +
+  labs(x = "Tissue", y = "") +
+  coord_flip() +
+  labs(fill = NULL) + # get rid of legend name
+  theme_minimal() +
+  theme(panel.grid = element_blank(), # get rid of all gridlines
+        axis.line = element_line(color = "black"), # bring back the x & y axis line
+        axis.ticks = element_line(color = "black"))
+
+arriba_fig3_plot
+
+# ggsave(
+#   "~/fusions/Figures/Figure_3/kinase_arriba.pdf",
+#   plot = arriba_fig3_plot,
+#   width = 8,
+#   height = 8,
+#   units = "in"
+# )
+```
+
+```{r}
+sf_fig3_plot <- ggplot(sf_fig3_df, aes(x=tissueType, y=count, fill=inFrame_kinase_group)) + 
+  geom_bar(stat = "identity") +
+  labs(x = "Tissue", y = "") +
+  coord_flip() +
+  labs(fill = NULL) + # get rid of legend name
+  theme_minimal() +
+  theme(panel.grid = element_blank(), # get rid of all gridlines
+        axis.line = element_line(color = "black"), # bring back the x & y axis line
+        axis.ticks = element_line(color = "black"))
+
+sf_fig3_plot
+
+# ggsave(
+#   "~/fusions/Figures/Figure_3/kinase_sf.pdf",
+#   plot = sf_fig3_plot,
+#   width = 8,
+#   height = 8,
+#   units = "in"
+# )
+```
+
+# Kinase text
+## In-frame kinase frequency
+```{r}
+kinaseInFrameFreq <- fig3_prep %>%
+  filter(!is.na(inFrameKinaseInvolved)) %>%
+  group_by(program, inFrameKinaseInvolved) %>%
+  summarize(count = n(), .groups = "drop") %>%
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  ungroup() %>%
+  mutate(percentage = freq*100)
+
+
+kinaseInFrameFreq
+```
+
+## Promoter swap with 3' kinase frequency
+```{r}
+threePrimeKinasePromSwapFreq <- fig3_prep %>%
+  filter(!is.na(promoterSwapThreePrimeKinaseInvolved)) %>%
+  group_by(program, promoterSwapThreePrimeKinaseInvolved) %>%
+  summarize(count = n(), .groups = "drop") %>%
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  ungroup() %>%
+  mutate(percentage = freq*100)
+
+threePrimeKinasePromSwapFreq
+```
+22 Arriba and 11 STAR-Fusion validated fusions represent possible promoter swapping events!
+
+## Mitelman + TumorFusions and in-frame kinases
+```{r}
+inFrameKinase_mitelmanTFStatus <- fig3_prep %>% # 7173 rows as expected
+  filter(inFrameKinaseInvolved == "TRUE") %>% # 192 rows
+  left_join(mitelman_accountAltSplcing) %>% # join with mitelman status! still 192 rows as expected
+  left_join(tf_accountAltSplcing) %>% # join with mitelman status! still 192 rows as expected
+  mutate(mitlemanTF_status = case_when(
+    (mitelmanFusion_match == "TRUE" | tf_match == "TRUE") ~ "TRUE",
+    (mitelmanFusion_match == "FALSE" & tf_match == "FALSE") ~ "FALSE"
+  )) %>%
+  group_by(program, mitlemanTF_status) %>%
+  summarize(count = n(), .groups = "drop") %>%
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  ungroup() %>%
+  mutate(percentage = freq*100)
+
+inFrameKinase_mitelmanTFStatus
+```
+45 or 39.47% (round to 39%) of the Arriba in-frame kinases match a gene pair in the mitelman database
+35 of 44.87% (round to 45%) of the STAR-Fusion in-frame kinases match a gene pair in the mitelman database
+
+Interestingly, all the "TRUE" instances represent a "TRUE" Mitleman instance but not all of them have a "TRUE" TumorFusions instance
+
+## Cell lines with in-frame kinase fusions
+
+```{r}
+cellLines_inFrameKinase_arriba <- fig3_prep %>%
+  filter(inFrameKinaseInvolved == "TRUE" & program == "arriba") %>%
+  distinct(sampleID)
+
+nrow(cellLines_inFrameKinase_arriba)
+
+paste0(((nrow(cellLines_inFrameKinase_arriba)/cellLines_withVals_arriba) * 100),
+       "%")
+```
+80 of the 322 cell lines with Arriba validations have in-frame kinase fusions. This represents 24.84% (round to 25%) of Arriba cell lines with validations
+
+```{r}
+cellLines_inFrameKinase_sf <- fig3_prep %>%
+  filter(inFrameKinaseInvolved == "TRUE" & program == "star-fusion") %>%
+  distinct(sampleID)
+
+nrow(cellLines_inFrameKinase_sf)
+
+paste0(((nrow(cellLines_inFrameKinase_sf)/cellLines_withVals_sf) * 100),
+       "%")
+```
+63 of the 299 cell lines with STAR-Fusion validations have in-frame kinase fusions. This represents 21.07% (round to 21%) of Arriba cell lines with validations
+
+# Kinases mentioned in kinase text section!
+```{r}
+prevDetected_kinases <- all_fusion_data_filtered_valStatus_annotated %>%
+  filter(program != "both" & discordant_read_support == "TRUE" & (reading_frame_arriba == "in-frame" | reading_frame_sf == "in-frame")) %>%
+  filter(fusion_name == "BCR::ABL1" | fusion_name == "EML4::ALK" | fusion_name == "ST7::MET" | fusion_name == "CAPZA2::MET" | threeprime_gene_name == "CDK12")
+```
+
+# Common miRNA hosts
+```{r}
+common_miRNA_hosts_prep <- all_fusion_data_filtered_valStatus_annotated %>%
+  filter(program != "both") %>%
+  filter(discordant_read_support == "TRUE") %>%
+  filter(fiveprime_miRNA_host == "TRUE" | threeprime_miRNA_host == "TRUE" | threeprime_candidate_miRNA_host == "TRUE") %>%
+  separate_rows(miRNA_fiveprime, miRNA_threeprime, miRNA_downstream_threeprime, sep = ",") %>%
+  select(fusion_name, geneID_fusionName, sampleID, tissueType, discordant_read_support, breakpoint_support, fiveprime_gene_name, threeprime_gene_name, fiveprime_miRNA_host, miRNA_fiveprime, threeprime_miRNA_host, miRNA_threeprime, threeprime_candidate_miRNA_host, miRNA_downstream_threeprime) %>% # 978
+  distinct() # drops to 551! Didn't include program!
+```
+
+## 5' miRNA hosts
+```{r}
+common_fivePrime_miRNAhost <- common_miRNA_hosts_prep %>%
+  filter(fiveprime_miRNA_host == "TRUE") %>%
+  select(miRNA_fiveprime, fiveprime_gene_name, sampleID, tissueType) %>%
+  distinct()
+
+common_fivePrime_miRNAhost_freq <- common_fivePrime_miRNAhost %>%
+  group_by(miRNA_fiveprime, fiveprime_gene_name) %>%
+  summarize(count = n(), .groups = "drop") %>% # to get counts for how many times that 5' partner recurs
+  arrange(desc(count))
+
+PVT1_fiveprime_miRNA_host <- common_fivePrime_miRNAhost %>%
+  filter(fiveprime_gene_name == "PVT1") %>%
+  filter(miRNA_fiveprime == "hsa-mir-1204")
+  
+length(unique(PVT1_fiveprime_miRNA_host$sampleID))
+length(unique(PVT1_fiveprime_miRNA_host$tissueType))
+```
+mir-1204 hosted by PVT1 is the most common miRNA hosted by a 5' partner! Found across 20 cell lines and 6 different tissue types
+
+## 3' miRNA hosts
+```{r}
+common_threePrime_miRNAhost <- common_miRNA_hosts_prep %>%
+  filter(threeprime_miRNA_host == "TRUE" | threeprime_candidate_miRNA_host == "TRUE") %>%
+  select(miRNA_threeprime, miRNA_downstream_threeprime, threeprime_gene_name, sampleID, tissueType) %>%
+  distinct() %>% # 193
+  # Lump the downstream miRNA in with the 3'
+  mutate(miRNA_threeprime = case_when(
+    (!is.na(miRNA_downstream_threeprime)) ~ miRNA_downstream_threeprime, 
+    TRUE ~ miRNA_threeprime
+  )) %>%
+  select(-miRNA_downstream_threeprime)
+
+common_threePrime_miRNAhost_freq <- common_threePrime_miRNAhost %>%
+  group_by(miRNA_threeprime, threeprime_gene_name) %>%
+  summarize(count = n(), .groups = "drop") %>% # to get counts for how many times that 3' partner recurs
+  arrange(desc(count))
+
+VMP1_threeprime_miRNA_host <- common_threePrime_miRNAhost %>%
+  filter(threeprime_gene_name == "VMP1") %>%
+  filter(miRNA_threeprime == "hsa-mir-21")
+  
+length(unique(VMP1_threeprime_miRNA_host$sampleID))
+length(unique(VMP1_threeprime_miRNA_host$tissueType))
+```
+mir-21 hosted by VMP1 is the most common miRNA hosted by a 3' partner! Dive deeper in the next steps
+
+# Deep dive into VMP1 & mir21, counts and Figure 5 prep
+## Starting DF for mir21/VMP1
+```{r}
+miRNA_VMP1 <- all_fusion_data_filtered_valStatus_annotated %>%
+  filter(program != "both") %>%
+  filter(discordant_read_support == "TRUE") %>%
+  filter(fiveprime_gene_name == "VMP1" | threeprime_gene_name == "VMP1") %>%
+  filter(miRNA_fiveprime == "hsa-mir-21" | miRNA_threeprime == "hsa-mir-21" | miRNA_downstream_threeprime == "hsa-mir-21") %>% # no instance of more than one miRNA sep with a comma for miRNA_threeprime! And as expected, only as 3' partner
+  select(fusion_id, fusion_name, geneID_fusionName, program, sampleID, tissueType, fiveprime_gene_name, program, discordant_read_support, breakpoint_support, hg38_fiveprime_gene_gtf_coordinates, hg38_fiveprime_junction_coordinate, hg38_fiveprime_breakpoint_sanityPassingPair, threeprime_gene_name, hg38_threeprime_gene_gtf_coordinates, hg38_threeprime_junction_coordinate, hg38_threeprime_breakpoint_sanityPassingPair, fusion_transcript_arriba, fusion_cds_sf, threeprime_miRNA_host, miRNA_threeprime, miRNA_fiveprime_coords) %>%
+  select(-c("fusion_id")) %>%
+    separate(
+    fusion_transcript_arriba,
+    into = c("fusion_transcript_arriba_fiveprime", "fusion_transcript_arriba_vmp1"),
+    sep = "\\|",       # split at the pipe
+    remove = FALSE,  # keep original if you like, set to TRUE if not needed
+    extra = "merge",
+    fill = "right"
+  ) %>%
+  separate(
+    fusion_cds_sf,
+    into = c("fusion_cds_sf_fiveprime", "fusion_cds_sf_vmp1"),
+    sep = "(?=[A-Z])",   # split at the first capital letter
+    remove = FALSE,
+    extra = "merge",     # keep the rest in part2
+    fill = "right"
+  ) %>%
+  select(-c("fusion_transcript_arriba_fiveprime", "fusion_transcript_arriba", "fusion_cds_sf_fiveprime", "fusion_cds_sf")) %>%
+  select(-c("hg38_fiveprime_gene_gtf_coordinates", "hg38_fiveprime_junction_coordinate", "hg38_fiveprime_breakpoint_sanityPassingPair"))
+
+miRNA_VMP1_arriba <- miRNA_VMP1 %>%
+  filter(program == "arriba") %>%
+  select(-fusion_cds_sf_vmp1) %>%
+  dplyr::rename("vmp1_transcript" = fusion_transcript_arriba_vmp1) %>%
+  distinct()
+
+miRNA_VMP1_sf <- miRNA_VMP1 %>%
+  filter(program == "star-fusion") %>%
+  select(-fusion_transcript_arriba_vmp1) %>%
+  dplyr::rename("vmp1_transcript" = fusion_cds_sf_vmp1) %>%
+  distinct()
+
+miRNA_VMP1_joined <- bind_rows(miRNA_VMP1_arriba, miRNA_VMP1_sf) %>% # 71 rows
+  distinct() # still 71
+```
+
+## How many cell lines, tissue types, and 5' partners for VMP1 fusions which host mir-21
+```{r}
+cellLinesWith_mir21 <- miRNA_VMP1 %>%
+  distinct(sampleID)
+
+nrow(cellLinesWith_mir21)
+
+tissueTypesWith_mir21 <- miRNA_VMP1 %>%
+  distinct(tissueType)
+
+nrow(tissueTypesWith_mir21)
+
+different_vmp1_partners <- miRNA_VMP1 %>%
+  select(geneID_fusionName, fiveprime_gene_name, threeprime_gene_name, sampleID, tissueType) %>%
+  distinct() %>% # drops to 24 distinct
+  group_by(fiveprime_gene_name) %>% # group by 5' partner and not sampleID
+  summarize(count = n(), .groups = "drop") %>% # to get counts for how many times that 5' partner recurs
+  arrange(desc(count))
+
+nrow(different_vmp1_partners) # 9 different partners
+different_vmp1_partners
+```
+
+22 different cell lines across 11 different tissue types with validated VMP1 fusions which host mir21. 
+9 different 5' partners to 3' VMP1 partner. CLTC and RPS6KB1 are the most common 5' partner across different cell lines
+
+## Figure 5 - VMP1/mir21 prep
+Use these dfs as a basis for creating the excel spreadsheet as a jumping off point for creating the 0-based bed files and FASTA files used in UCSC genome browser and BLAT
+```{r}
+UBE2O_VMP1 <- miRNA_VMP1_joined %>%
+  filter(fusion_name == "UBE2O::VMP1")
+
+CLTC_VMP1 <- miRNA_VMP1_joined %>%
+  filter(fusion_name == "CLTC::VMP1")
+
+SOX9AS1_VMP1 <- miRNA_VMP1_joined %>%
+  filter(fusion_name == "SOX9-AS1::VMP1")
+
+RPS6KB1_VMP1 <- miRNA_VMP1_joined %>%
+  filter(fusion_name == "RPS6KB1::VMP1") 
+
+RNFT1DT_VMP1 <- miRNA_VMP1_joined %>%
+  filter(fusion_name == "RNFT1-DT::VMP1")
+
+BRIP1_VMP1 <- miRNA_VMP1_joined %>%
+  filter(fusion_name == "BRIP1::VMP1")
+
+PALLD_VMP1 <- miRNA_VMP1_joined %>%
+  filter(fusion_name == "PALLD::VMP1")
+
+ENSG00000267318_VMP1 <- miRNA_VMP1_joined %>%
+  filter(fusion_name == "ENSG00000267318::VMP1")
+
+TUBD1_VMP1 <- miRNA_VMP1_joined %>%
+  filter(fusion_name == "TUBD1::VMP1")
+
+unique_fig5 <- miRNA_VMP1_joined %>%
+  select(fusion_name, sampleID, hg38_threeprime_junction_coordinate) %>%
+  distinct() # should have 40 distinct combinations, and indeed we do in the excel spreadsheet!
+```
+
+# CGC in the text
+## Fusion pairs involving CGC genes x fusion pairs in Mitelman and/or TumorFusions
+```{r}
+cgc_mitelmanTFStatus <- cgc_accountAltSplcing %>%
+  filter(involvesCGC == "TRUE") %>%
+  left_join(mitelman_accountAltSplcing) %>%
+  left_join(tf_accountAltSplcing) %>%
+  mutate(mitlemanTF_status = case_when(
+    (mitelmanFusion_match == "TRUE" | tf_match == "TRUE") ~ "TRUE",
+    (mitelmanFusion_match == "FALSE" & tf_match == "FALSE") ~ "FALSE"
+    ))
+  
+cgc_mitelmanTFStatus_freq <- cgc_mitelmanTFStatus %>%
+  group_by(program, mitlemanTF_status) %>%
+  summarize(count = n(), .groups = "drop") %>%
+  group_by(program) %>%
+  mutate(freq = count/sum(count)) %>%
+  ungroup() %>%
+  mutate(percentage = freq*100)
+  
+cgc_mitelmanTFStatus_freq
+
+cgc_mitelmanTFStatus_unique <- cgc_mitelmanTFStatus %>%
+  filter(mitlemanTF_status == "TRUE") %>%
+  distinct(geneID_fusionName)
+
+nrow(cgc_mitelmanTFStatus_unique)
+```
+147 or 19.73% (round to 20%) of Arriba fusions with a CGC match have a match to the Mitelman or TumorFusions dataset. The remaining 598 (80.27%, round to 80%) did not have a match. 
+
+91 or 32.38% (round to 32%) of STAR-Fusion fusions with a CGC match have a match to the Mitelman or TumorFusions dataset. The remaining 190 (67.61%, round to 68%) did not have a match. 
+
+The counts for CGC change slightly due to the addition of RICTOR and ROCK1 genes to the CGC v102 dataset vs. CGC v101
+
+Regardless of program, 120 unique fusion gene pairs involved a gene from the COSMIC CGC list.
