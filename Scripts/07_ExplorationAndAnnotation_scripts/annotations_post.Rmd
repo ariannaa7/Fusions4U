@@ -153,13 +153,17 @@ Total = 356254 fusions because identical validated fusions are featured in separ
 # write.table(all_fusion_data_filtered_valStatus_annotated %>% filter(discordant_read_support == "TRUE"), file = "~/fusions/fusions_valAnnotated.tsv", sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE) # Keep headers, don't add row numbers, don't put cells in quotes
 # 
 # 
-# write.table(all_fusion_data_filtered_valStatus_annotated %>% 
+# write.table(all_fusion_data_filtered_valStatus_annotated %>%
 #               filter(discordant_read_support == "TRUE" & program != "both") %>%
-#               select(-c("hg38_fiveprime_searchStart", "hg38_fiveprime_searchEnd", "hg19_fiveprime_searchStart", "hg19_fiveprime_searchEnd",
-#                         "hg38_threeprime_searchStart", "hg38_threeprime_searchEnd", "hg19_threeprime_searchStart", "hg19_threeprime_searchEnd",
+#               select(-c("hg38_fiveprime_chr", "hg38_fiveprime_gene_gtfStart", "hg38_fiveprime_fusion_junction", "hg38_fiveprime_gene_gtfEnd", "hg38_fiveprime_searchStart",
+#                         "hg38_fiveprime_searchEnd", "hg19_fiveprime_chr", "hg19_fiveprime_geneStart", "hg19_fiveprime_fusion_junction", "hg19_fiveprime_geneEnd",
+#                         "hg19_fiveprime_searchStart", "hg19_fiveprime_searchEnd", "hg38_threeprime_chr", "hg38_threeprime_gene_gtfStart", "hg38_threeprime_fusion_junction",
+#                         "hg38_threeprime_gene_gtfEnd", "hg38_threeprime_searchStart", "hg38_threeprime_searchEnd", "hg19_threeprime_chr", "hg19_threeprime_geneStart",
+#                         "hg19_threeprime_fusion_junction", "hg19_threeprime_geneEnd", "hg19_threeprime_searchStart", "hg19_threeprime_searchEnd",
+#                         "read_identifiers_arriba",
 #                         "miRNA_fiveprime_gffStart", "miRNA_fiveprime_gffEnd", "miRNA_threeprime_gffStart", "miRNA_threeprime_gffEnd",
-#                         "miRNA_downstream_threeprime_gffStart", "miRNA_downstream_threeprime_gffEnd")),
-#             file = "~/fusions/additional_file_1.tsv", sep = "\t", 
+#                         "miRNA_downstream_threeprime_gffStart", "miRNA_downstream_threeprime_gffEnd")),  # saving space for file limit!
+#             file = "~/fusions/additional_file_1.tsv", sep = "\t",
 #             row.names = FALSE, col.names = TRUE, quote = FALSE) # Keep headers, don't add row numbers, don't put cells in quotes
 ```
 
