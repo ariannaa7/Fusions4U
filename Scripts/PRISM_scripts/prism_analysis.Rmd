@@ -1,0 +1,634 @@
+---
+title: "PRISM drug screening analysis"
+author: "Arianna Alamshahi"
+output: html_document
+description: "Case study with PRISM drug screening dataset and our dataset of validated fusions"
+version: "1.0.0"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep steps
+
+## Load packages
+```{r}
+suppressPackageStartupMessages(library(knitr, quietly = TRUE, warn.conflicts = FALSE)) # v1.49
+
+suppressPackageStartupMessages(library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)) # v2.0.0
+
+suppressPackageStartupMessages(library(readxl, quietly = TRUE, warn.conflicts = FALSE)) # v1.4.3
+```
+
+# Load in files
+
+Validated fusion dataset
+```{r}
+val_fusions <-
+  read.csv("~/fusions/allFusions_valAnnotated.tsv",
+    header = TRUE,
+    sep = "\t"
+  ) %>% # 35624 fusions
+  filter(program != "both") %>% # 33032 fusions, show twin fusions twice on two sep rows instead of also including the third "both" rrow
+  filter(discordant_read_support == "TRUE") # 10997 validated fusions, 322 cell lines (out of the 328 tested) have fusions
+```
+
+Cell line supplementary
+```{r}
+cellLine_supp <- read.csv("~/fusions/supplementary_cellLine_info.tsv", header = TRUE, sep = "\t")
+```
+
+The PRISM guiding metadata df
+```{r}
+prismCellLines_df <-
+  read_excel(
+    "~/fusions/PRISM/Corsello_supplemental_tables.xlsx",
+    sheet = "1-Cell lines tested",
+    skip = 2,
+    col_names = TRUE
+  ) %>%
+  separate(
+    ccle_name,
+    into = c("ccle_cellLine", "tissueType"),
+    sep = "_",
+    extra = "merge"
+  ) # 578 cell lines, 7 columns
+```
+
+The PRISM secondary drug screening log2fc dataframe
+```{r}
+secondary_log2fc <-
+  read.csv(
+    "~/fusions/PRISM/secondary-screen-replicate-collapsed-logfold-change.csv",
+    header = TRUE,
+    check.names = FALSE # to keep the treatment cols the same as they were originally!
+  ) # 489 rows (cell lines), 13009 columns (13008 treatments)
+
+names(secondary_log2fc)[1] <- "depmap_id" # update the name! it has no name because of check.names = FALSE, so we need to use base R
+
+secondary_log2fc <- secondary_log2fc %>%
+  left_join(prismCellLines_df %>% dplyr::select(depmap_id, ccle_cellLine, tissueType)) %>% # 489/578 cell lines were included in the PRISM secondary screening
+  relocate(ccle_cellLine, tissueType, .after = depmap_id)
+```
+
+PRISM metadata for compounds tested df
+```{r}
+prismCompoundsTested_df <-
+  read_excel(
+    "~/fusions/PRISM/Corsello_supplemental_tables.xlsx",
+    sheet = "2-Compounds tested",
+    skip = 2,
+    col_names = TRUE
+  ) # 4960 rows (treatments). 4519 unique drugs! We are interested in the "drug category" column from this one
+```
+
+The PRISM secondary drug screening collapsed treatment info df 
+```{r}
+secondary_treatmentInfo_df <-
+  read.csv(
+    "~/fusions/PRISM/secondary-screen-replicate-collapsed-treatment-info.csv",
+    header = TRUE
+  ) # 13008 rows (treatments). 1448 unique drugs!
+# Some drugs appear more than 8x (or more) because they have 8 point doses on different compound plates (but same broad ID and drug name)!
+```
+
+
+# Create new dfs and update exisitng ones based on the base and metadata dfs
+
+## Identify cell lines which are in our validated datset AND in the PRISM Secondary screening
+recall, NOT all of the cell lines in the PRISM metadata are included in the secondary screening
+```{r}
+secondary_eligible_cellLines <-
+  intersect(
+    intersect(val_fusions$sampleID, prismCellLines_df$ccle_cellLine),
+    secondary_log2fc$ccle_cellLine
+  ) # 198 eligible cell lines!
+```
+
+## Update the L2FC df to only include eligible cell lines
+
+```{r}
+secondary_log2foldChange_df <-
+  secondary_log2fc %>% # 489 rows (cell lines), 130011 columns (13008 treatments)
+  filter(ccle_cellLine %in% secondary_eligible_cellLines) # drops to 198 (cell lines) as expected (the number of eligible cell lines)
+```
+
+## Create a mapping df for treatments
+
+```{r}
+secondary_id_mapping_df <-
+  data.frame(secScreen_treatID = colnames(
+    secondary_log2foldChange_df %>% dplyr::select(-depmap_id, -ccle_cellLine, -tissueType)
+  )) %>% # 13008 rows, number of treatments! Pulls column names (treatments) from secondary_log2foldChange_df as rows!
+
+  # Create a column to match broad_id format in secondary_treatmentInfo_df
+  mutate(broad_id = str_extract(secScreen_treatID, "^[^:]+"))
+```
+
+## Update the secondary_treatmentInfo_df to include the other name columns from secondary_id_mapping_df
+
+```{r}
+secondary_treatmentInfo_df <-
+  secondary_treatmentInfo_df %>% # use the original df (13008 rows) to expand upon
+
+  # Join with secondary_id_mapping_df
+  left_join(secondary_id_mapping_df,
+    by = c("column_name" = "secScreen_treatID", "broad_id")
+  ) %>%
+  
+  dplyr::rename(secScreen_treatID = "column_name") %>% # rename it so it is more meaningful! Secondary screen treatment ID
+  # Sanity check the dose in the name vs. the dose provided in treatment info
+  mutate(dose_from_name = (str_extract(secScreen_treatID, "(?<=::)[^:]+(?=::)"))) %>% # pull the dose from the name! don't convert to numeric, there is a small rounding issue for 4 instances where they differ by 1e-19 based on how R converted from string to numeric
+  filter(dose_from_name == dose) %>% # sanity check passed
+  dplyr::select(-dose_from_name) # drop the column!
+```
+
+## Account for NAs and pull one dose per treatment/plate combo
+
+### Count number of NAs for log2fold change across cell lines to initially choose which doses to keep
+
+```{r}
+secondary_naCheck_logfoldChange_long <-
+  secondary_log2foldChange_df %>% # 198 rows (cell lines), 13011 cols (13008 treatments)
+  pivot_longer(
+    cols = -c(depmap_id, ccle_cellLine, tissueType),
+    names_to = "treatment",
+    values_to = "log2fc"
+  ) %>% # 2575584 rows, 5 cols
+
+  # Join with the secondary_treatmentInfo_df
+  left_join(
+    secondary_treatmentInfo_df %>% dplyr::select(secScreen_treatID, broad_id, compound_plate, name),
+    by = c("treatment" = "secScreen_treatID")
+  ) %>% # 2575584 rows, 8 cols
+  relocate(log2fc, .after = name) %>%
+  # Group and summarize
+  group_by(treatment, broad_id, compound_plate, name) %>% # one "name" per "broad_id"
+  summarize(
+    total_n = n(), # total will always be 198 because 198 of our cell lines with fusions appear in the prism secondary screening set
+    na_count = sum(is.na(log2fc)), # sum of NAs for that treatment across cell lines
+    na_ratio = na_count / total_n, # ratio of NAs per treatment (essentially for each dose of a drug/plate combo, how many NAs are there across the 198 cell lines)
+    .groups = "drop"
+  ) %>%
+  # Filter to only keep treatments with NA ratio at or below 0.2 (treatment was tested for 80% of the cell lines)
+  filter(na_ratio <= 0.2) # some ratios are 1.00 (meaning that treatment was not tested across ANY of our cell lines. We are uninterested in that!)
+# drops to 11814 rows
+# 1340/1448 unique drugs remain! 81 of the drug/compound_plate combos have less than 8 different doses! 1277 drug/compound_plate combos still have 8 doses
+```
+
+### Vector of treatments which pass filtering
+
+```{r}
+secondary_naFilt_passing_treatments <-
+  pull(secondary_naCheck_logfoldChange_long, treatment) # the 11814 treatments which pass our NA level filtering
+```
+
+### Filter log2fold change to only include treatments which passed NA filtering
+
+```{r}
+secondary_naFilt_log2foldChange <-
+  secondary_log2foldChange_df %>% # 198 rows (cell lines), 13011 cols (13008 treatments)
+  dplyr::select(
+    depmap_id,
+    ccle_cellLine,
+    tissueType,
+    all_of(secondary_naFilt_passing_treatments)
+  ) # 11817 cols (11814 treatments)
+```
+
+## Create "final" versions of dataframes to act as jumping off point downstream
+
+### Update the treatment info DF so a drug/plate combination appears only once
+```{r}
+final_secondary_treatmentInfo <- secondary_treatmentInfo_df %>% # 13008 rows (treatments)
+
+  # Only keep secScreen_treatIDs which appear in secondary_naFilt_passing_treatments
+  filter(secScreen_treatID %in% secondary_naFilt_passing_treatments) %>% # drops to 11814 rows (treatments which passed NA filtering)
+
+  # Group by broad_id, compound_plate, and name! Then filter to keep only one row per group
+  group_by(broad_id, compound_plate, name) %>% # only 1 broad_id for each drug name, but the drugs could've originally 8x doses on more than one compound plate so then the broad_id/name would appear more than 8x
+  mutate(mean_dose = mean(dose)) %>% # creates a column with calculated mean for each broad_id, compound_plate, and name group
+  mutate(diff = abs(dose - mean_dose)) %>% # creates a column with absolute value of dose-mean_dose
+  relocate(mean_dose, diff, .after = dose) %>%
+  slice_min(
+    order_by = diff,
+    n = 1,
+    with_ties = FALSE
+  ) %>% # Drops to 1496! will keep only one row per group. The row with the dose closest (absolute value) to the calculated mean value for the group
+  ungroup() %>% # 1340 unique drugs as expected per the naCheck filtering! again, some drugs will appear more than once (same drug and broad ID), but with a different compound_plate
+  dplyr::select(-mean_dose, -diff) %>% # remove the temporary cols
+
+  # Join with prismCompoundsTested_df to get the drug category column
+  left_join(prismCompoundsTested_df) %>%
+  relocate(drug_category, .after = moa) %>%
+  # Filter out treatments that lack a drug category
+  filter(!(is.na(drug_category))) # drops to 1153! These drugs don't have a drug category! Also filters out anything without MOA (nor do they have a drug_category) 1052 unique drugs!
+```
+
+### Create a vector of treatment IDs we will move forward with
+```{r}
+final_secondary_Treatments <-
+  pull(final_secondary_treatmentInfo, secScreen_treatID) # 1153 as expected, now only one dose for each med and ONLY treatments a specified drug category
+```
+
+### Create a Log2fc dataframe that includes only the treatments we will move forward with
+```{r}
+final_secondary_log2foldChange <-
+  secondary_naFilt_log2foldChange %>% # 198 rows (cell lines), 11817 cols (11814 treatments) as expected
+  dplyr::select(depmap_id, ccle_cellLine, tissueType, all_of(final_secondary_Treatments)) # 1156 cols (1153 treatments) as expected
+```
+
+```{r}
+final_secondary_log2foldChange_long <- final_secondary_log2foldChange %>% # 198 rows (representing cell lines)
+  pivot_longer(
+    cols = -c(depmap_id, ccle_cellLine, tissueType),
+    names_to = "treatment",
+    values_to = "log2fc"
+  ) # 228294 rows after pivoting
+```
+
+
+# Identify gene candidates - genes involved in in-frame/promoter-swapping fusions in at least 2 cell lines
+
+## Dataframe with candidate fusions
+```{r}
+secondary_candidate_fusions <- val_fusions %>% # 10997 rows as expected
+  filter(sampleID %in% secondary_eligible_cellLines) %>% # drops to 6197! Only keep fusions that are in cell lines which are also included in the secondary screening set
+
+  # Select rows that have involve a kinase and are promoter swapping OR involve an in-frame kinase. If it is promoter swapping, it will be listed as "FRAME_UNKNOWN" which is why we also allow a true threeprime_kinase for promoter swaps
+  filter((reading_frame_arriba == "in-frame" | reading_frame_sf == "in-frame") | promoterSwapEventCandidate == "TRUE") %>% # drops to 1923
+  
+  # Select relevant columns
+  dplyr::select(
+    fusion_name,
+    fiveprime_gene_name,
+    threeprime_gene_name,
+    program,
+    sampleID,
+    tissueType,
+    promoterSwapEventCandidate,
+    reading_frame_arriba,
+    reading_frame_sf
+  ) %>%
+  mutate(reading_frame = case_when(
+    (program == "arriba") ~ reading_frame_arriba,
+    (program == "star-fusion") ~ reading_frame_sf
+  )) %>%
+  dplyr::select(-c("program", "reading_frame_arriba", "reading_frame_sf")) %>%
+  distinct() # drops to 979
+```
+
+## Check if genes in fusions (regardles of 5' or 3' partner) appear in more than one cell line
+```{r}
+secondary_candidate_genes_df <- bind_rows(secondary_candidate_fusions %>% dplyr::select(-threeprime_gene_name) %>% dplyr::rename(candidate_gene =
+                                                                                                                      "fiveprime_gene_name"),
+                                          secondary_candidate_fusions %>% dplyr::select(-fiveprime_gene_name) %>% dplyr::rename(candidate_gene =
+                                                                                                                     "threeprime_gene_name")) %>%
+  distinct() %>% # sanity check, all distinct
+  group_by(candidate_gene) %>%
+  filter(n_distinct(sampleID) > 1) %>%
+  ungroup()
+```
+
+## Pull the genes that passed our testing into a vector
+```{r}
+secondary_gene_candidates <- secondary_candidate_genes_df %>%
+  dplyr::select(candidate_gene) %>%
+  distinct() %>%
+  pull(candidate_gene) # 202 gene candidates!
+```
+
+# Create matrices and run t-tests
+
+## Cell line vs. treatment matrix
+```{r}
+secondary_cellLine_v_treat_log2fc_matrix <- final_secondary_log2foldChange %>%
+  dplyr::select(-c(depmap_id, tissueType)) %>%
+  column_to_rownames(var = "ccle_cellLine") %>%  # set ccle cell line as row names
+  as.matrix()     
+```
+198 cell lines vs. 1153 treatments
+
+## Cell line vs. gene matrix
+```{r}
+secondary_cellLine_v_gene_matrix <- matrix("FALSE", nrow = length(secondary_eligible_cellLines), ncol = length(secondary_gene_candidates),
+                   dimnames = list(secondary_eligible_cellLines, secondary_gene_candidates))
+
+# True meaning it contains an in-frame or promoter-swapping kinase
+
+for (cellLine in secondary_eligible_cellLines) { 
+  for (candidate in secondary_gene_candidates) {
+    
+    subset <- val_fusions %>% 
+      filter(sampleID == cellLine & (fiveprime_gene_name == candidate | threeprime_gene_name == candidate))
+    
+    if(nrow(subset) > 0) {
+      
+      if(any((subset$promoterSwapEventCandidate == "TRUE" | (subset$reading_frame_arriba == "in-frame" | subset$reading_frame_sf == "in-frame")), # check logic on this? alt-splicing should be fine, just if any instance
+             na.rm = TRUE)) { # check this na.rm as well? only applies to promoterSwapEventCandidate, reading_frame_arriba, and reading_frame_sf
+        secondary_cellLine_v_gene_matrix[cellLine, candidate] <- "TRUE"
+      }
+    }
+  }
+}
+```
+198 cell lines vs. 202 genes
+
+## Convert the matrices into dfs and join
+```{r}
+# Turn the matrices into dfs
+secondary_cellLine_v_treat_log2fc_df <- as.data.frame(secondary_cellLine_v_treat_log2fc_matrix) %>%
+  rownames_to_column(var = "ccle_cellLine") %>%
+  pivot_longer(-ccle_cellLine, names_to = "treatment", values_to = "log2fc")
+
+secondary_cellLine_v_gene_df <- as.data.frame(secondary_cellLine_v_gene_matrix) %>%
+  rownames_to_column(var = "ccle_cellLine") %>%
+  pivot_longer(-ccle_cellLine, names_to = "candidate_gene", values_to = "status")
+
+# Join the dfs
+secondary_joined_df <- secondary_cellLine_v_gene_df %>%
+  left_join(secondary_cellLine_v_treat_log2fc_df) %>%
+  left_join(cellLine_supp %>% filter(sampleID %in% secondary_eligible_cellLines) %>% dplyr::select(sampleID, tissueType, disease), by = c("ccle_cellLine" = "sampleID")) %>% # join with supp to get more cell line info
+  relocate(tissueType, disease, .after = ccle_cellLine)
+```
+
+## Checking missingness of log2fc values for "TRUE" and "FALSE" scenarios
+
+### Get the frequency of missingness
+```{r}
+secondary_missing_log2fc_freq <- secondary_joined_df %>%
+  mutate(log2fc_status = case_when(
+    (is.na(log2fc)) ~ "missing",
+    (!is.na(log2fc)) ~ "not_missing"
+  )) %>%
+  
+  # Group by gene, treatment, status (TRUE or FALSE), AND log2fc_status (missing or not_missing)
+  # Get the count for each group and then drop!
+  group_by(candidate_gene, treatment, status, log2fc_status) %>% # 46115388
+  summarize(count = n(), .groups = "drop") %>% # 718741
+  
+  # Now, group by the same cols as before MINUS the log2fc_status col
+  # Calculate the total per gene, per treatment, per status
+  group_by(candidate_gene, treatment, status) %>% 
+  mutate(total = sum(count)) %>%
+  
+  # Get the frequency of false_missing and false_not_missing PER FALSE. Same concept for true
+  mutate(freq = count/total)
+```
+
+### Density plots and summary stats for missing log2fc freq of FALSE scenarios
+```{r}
+secondary_dist_false_missing_plot <- ggplot(secondary_missing_log2fc_freq %>% filter(status == "FALSE" & log2fc_status == "missing"), aes(x = freq)) +
+  geom_density(fill = "lightgreen", alpha = 0.5) +
+  labs(title = "Density Plot of missing log2fc for FALSE", x = "freq", y = "Density") +
+  theme_minimal()
+
+secondary_dist_false_missing_plot
+
+summary(secondary_missing_log2fc_freq %>% filter(status == "FALSE" & log2fc_status == "missing") %>% pull(freq))
+```
+
+### Density plots and summary stats for missing log2fc freq of TRUE scenarios
+```{r}
+secondary_dist_true_missing_plot <- ggplot(secondary_missing_log2fc_freq %>% filter(status == "TRUE" & log2fc_status == "missing"), aes(x = freq)) +
+  geom_density(fill = "lightgreen", alpha = 0.5) +
+  labs(title = "Density Plot of missing log2fc for TRUE", x = "freq", y = "Density") +
+  theme_minimal()
+
+secondary_dist_true_missing_plot
+
+summary(secondary_missing_log2fc_freq %>% filter(status == "TRUE" & log2fc_status == "missing") %>% pull(freq))
+```
+
+## Create a function for running t-tests on whatever df is provided in input
+```{R}
+secondary_tTest <- function(df_prepped_forTtest, treatmentInfo_df) {
+  df <- df_prepped_forTtest %>%
+    group_by(candidate_gene, treatment) %>%
+    summarize(
+      cellLines_TRUE = paste(unique(ccle_cellLine[status == "TRUE"]), collapse = ", "), 
+      tissueType_TRUE = paste(unique(tissueType[status == "TRUE"]), collapse = ", "),
+      diseases_TRUE = paste(unique(disease[status == "TRUE"]), collapse = ", "),
+
+      cellLines_FALSE = paste(unique(ccle_cellLine[status == "FALSE"]), collapse = ", "),
+      tissueType_FALSE = paste(unique(tissueType[status == "FALSE"]), collapse = ", "),
+      diseases_FALSE = paste(unique(disease[status == "FALSE"]), collapse = ", "),
+      
+      avg_log2fc_TRUE = mean(log2fc[status == "TRUE"], na.rm = TRUE), # this is really only applicable to the two scenarios in which we didn't already filter out all NAs. only affects the avg and median calcs as specified. t-test results remain the same
+      median_log2fc_TRUE = median(log2fc[status == "TRUE"], na.rm = TRUE),
+      
+      avg_log2fc_FALSE = mean(log2fc[status == "FALSE"], na.rm = TRUE),
+      median_log2fc_FALSE = median(log2fc[status == "FALSE"], na.rm = TRUE),
+      
+      t_test = list(t.test(log2fc ~ status, alternative = "two.sided", var.equal = FALSE)),  # run t-test within each group
+      .groups = "drop" # must drop grouping before getting the adjusted p-value
+      ) %>%
+    
+    mutate(
+      t_test_statistic = map_dbl(t_test, ~ .$statistic),
+      df = map_dbl(t_test, ~ .$parameter),
+      p_value = map_dbl(t_test, ~ .$p.value),
+      conf_low = map_dbl(t_test, ~ .$conf.int[1]),
+      conf_high = map_dbl(t_test, ~ .$conf.int[2])
+      ) %>%
+    
+    dplyr::select(-t_test) %>%
+    
+    mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+    
+    relocate(p_adj, .after = p_value) %>%
+    
+    left_join(treatmentInfo_df %>% dplyr::select(secScreen_treatID, dose, name, moa, drug_category, target, `disease.area`, indication), by =
+                c("treatment" = "secScreen_treatID")) %>%
+    
+    relocate(dose, name, moa, drug_category, target, `disease.area`, indication, .after = treatment)
+    
+  return(df)
+}
+```
+
+## T-test df: filter out all log2fc NAs for TRUE and none for FALSE, candidate gene x treatment combo needs to have more than one instance for TRUE and for FALSE
+```{r}
+secondary_notrueNAs_keepFalseNAs_df <- secondary_joined_df %>% # 46115388
+  filter(!(is.na(log2fc) & status == "TRUE")) %>% # 46085320
+  group_by(candidate_gene, treatment) %>%
+  filter(sum(status == "TRUE") > 1 & sum(status == "FALSE") > 1) %>% # 42427149
+  ungroup()
+```
+42427149 rows
+
+```{r}
+secondary_notrueNAs_keepFalseNAs_tTest <- secondary_tTest(secondary_notrueNAs_keepFalseNAs_df, final_secondary_treatmentInfo)
+```
+214329 tests
+
+```{r}
+secondary_notrueNAs_keepFalseNAs_tTest_sig <- secondary_notrueNAs_keepFalseNAs_tTest %>% # 214329 tests
+  filter(p_adj <= 0.05) # 11072 tests with significant p-value
+  # filter(avg_log2fc_TRUE < avg_log2fc_FALSE) %>% # 4255 significant with lower average for "TRUE" than for "FALSE"
+  # filter(avg_log2fc_TRUE < 0) # 3675 significant with lower average for "TRUE" than for "FALSE" and where average "TRUE" is less than 0
+```
+95 significant tests where average of TRUE is both less than average of FALSE and less than 0
+
+# Output t-test files
+```{r}
+# write.table(
+#   secondary_notrueNAs_keepFalseNAs_tTest, "~/fusions/PRISM/t_test/noTrueNAs_keepFalseNAs_ttest.tsv", sep = "\t",
+#   row.names = FALSE, col.names = TRUE, quote = FALSE
+#   )
+# 
+# write.table(
+#   secondary_notrueNAs_keepFalseNAs_tTest_sig %>%
+#     select(-c("cellLines_FALSE", "tissueType_FALSE", "diseases_FALSE")), # saving space for file limit!
+#   "~/fusions/additional_file_2.tsv", sep = "\t",
+#   row.names = FALSE, col.names = TRUE, quote = FALSE
+#   )
+```
+
+# Visualize!
+## Set up functions for ease
+```{r}
+pull_drugs <- function(treatmentInfo_df, protein_inhibited){
+  
+  df <- treatmentInfo_df %>%
+    filter(str_detect(moa, protein_inhibited))
+  
+  return(df)
+}
+
+pull_drugGene_tResults <- function(t_test_df, protein_inhibited, geneCandidate){
+  
+  df <- t_test_df %>%
+    filter(str_detect(moa, protein_inhibited)) %>% 
+    filter(candidate_gene == geneCandidate) %>% # 7 drugs as expected!
+    mutate(sig_status = case_when(
+    (p_adj <= 0.05 & p_adj > 0.01) ~ "*",
+    (p_adj <= 0.01 & p_adj > 0.001) ~ "**",
+    (p_adj <= 0.001) ~ "***",
+    (p_adj > 0.05) ~ "not_sig"
+    ))  
+  
+  return(df)
+}
+
+pull_drugGene_l2fc_long <- function(log2fc_long_df, drugGene_tResults_df, geneCandidate, drug_df){
+  
+  df <- log2fc_long_df %>%
+    filter(treatment %in% drugGene_tResults_df$treatment) %>% # drops to 264280
+    filter(candidate_gene == geneCandidate) %>% # 1386
+    left_join(drug_df %>% dplyr::select(secScreen_treatID, name, dose, compound_plate), by = c("treatment" = "secScreen_treatID")) %>% # get the drug dose & plate info
+    dplyr::select(-c("tissueType", "disease", "candidate_gene", "treatment")) %>%
+    mutate(name_dose_plate = paste0(name, "_", dose, "_", compound_plate))
+  
+  return(df)
+}
+
+fill_colors <- c("TRUE" = "white", "FALSE" = "white")   # boxes are white
+point_colors <- c("TRUE" = "#0072B2", "FALSE" = "#D55E00") # jitter points
+# use 0072B2 and D55E00 for lines in Affinity
+# 
+# 
+drug_gene_boxplot <- function(drugGene_l2fc_long_df, protein_inhibited, geneCandidate) {
+  
+  plot <- drugGene_l2fc_long_df %>%
+    ggplot(aes(x = name_dose_plate, y = log2fc, fill = status)) +
+    geom_boxplot(position = position_dodge(width = 0.8), outlier.shape = NA) + 
+    geom_jitter(aes(color = status),
+                position = position_jitterdodge(
+                  # jitter.width = 0,  # omit width to go with default horizontal jitter
+                  jitter.height = 0,   # no vertical jitter
+                  dodge.width = 0.8
+                  ),
+                alpha = 0.6, size = 1.5) +
+    scale_color_manual(values = point_colors) +
+    scale_fill_manual(values = fill_colors) +
+    theme_classic(base_size = 14) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid.major.x = element_blank()
+      ) +
+    labs(x = paste0(str_to_sentence(protein_inhibited), " inhibiting drugs"), y = "Log2 Fold Change", fill = bquote("Cell line with " * italic(.(geneCandidate) *" fusion")), color = bquote("Cell line with " * italic(.(geneCandidate) *" fusion"))
+    )
+
+  return(plot)
+}
+
+```
+
+# MOA = Kinesin: AFF3, in HCC44 and GAMG cell lines
+POLR1A::AFF3 in HCC44
+MAP4K4::AFF3 in GAMG
+```{r}
+kinesin_drugs <- pull_drugs(final_secondary_treatmentInfo, "kinesin") # 7 kinesin inhibiting drugs!
+
+kinesin_AFF3_tResults <- pull_drugGene_tResults(secondary_notrueNAs_keepFalseNAs_tTest, "kinesin", "AFF3")
+
+kinesin_AFF3_l2fc_long <- pull_drugGene_l2fc_long(secondary_notrueNAs_keepFalseNAs_df, kinesin_AFF3_tResults, "AFF3", kinesin_drugs) # 1386
+
+kinesin_AFF3_boxplot <- drug_gene_boxplot(kinesin_AFF3_l2fc_long, "kinesin", "AFF3")
+pdf("~/fusions/Figures/Figure_7/kinesin_AFF3_boxplot.pdf", width = 15, height = 8)
+kinesin_AFF3_boxplot
+dev.off()
+```
+
+
+# MOA = MEK: EML4, in HDQP1 and NCIH2228 cell lines
+EML4::PKDCC in HDQP1
+EML4::ALK in NCIH2228
+```{r}
+mek_drugs <- pull_drugs(final_secondary_treatmentInfo, "MEK") # 19 MEK inhibiting drugs!
+
+mek_EML4_tResults <- pull_drugGene_tResults(secondary_notrueNAs_keepFalseNAs_tTest, "MEK", "EML4")
+
+mek_EML4_l2fc_long <- pull_drugGene_l2fc_long(secondary_notrueNAs_keepFalseNAs_df, mek_EML4_tResults, "EML4", mek_drugs) # 3672
+
+mek_EML4_boxplot <- drug_gene_boxplot(mek_EML4_l2fc_long, "MEK", "EML4")
+pdf("~/fusions/Figures/Figure_7/mek_EML4_boxplot.pdf", width = 15, height = 8)
+mek_EML4_boxplot
+dev.off()
+```
+
+# MOA = CHK: KMT2A in HCC38 and CAOV3 cell lines + MAU2 in SKUT1 and MKN7
+KMT2A::ATP5MG in HCC38
+KMT2A::PHLDB1 in CAOV3
+GATAD2A::MAU2 in MKN7
+GATAD2A::MAU2 in SKUT1
+```{r}
+chk_drugs <- pull_drugs(final_secondary_treatmentInfo, "CHK") # 10 CHK inhibiting drugs!
+
+
+chk_KMT2A_tResults <- pull_drugGene_tResults(secondary_notrueNAs_keepFalseNAs_tTest, "CHK", "KMT2A")
+
+chk_KMT2A_l2fc_long <- pull_drugGene_l2fc_long(secondary_notrueNAs_keepFalseNAs_df, chk_KMT2A_tResults, "KMT2A", chk_drugs) # 1980
+
+chk_KMT2A_boxplot <- drug_gene_boxplot(chk_KMT2A_l2fc_long, "CHK", "KMT2A")
+pdf("~/fusions/Figures/Figure_7/chk_KMT2A_boxplot.pdf", width = 15, height = 8)
+chk_KMT2A_boxplot
+dev.off()
+
+
+chk_MAU2_tResults <- pull_drugGene_tResults(secondary_notrueNAs_keepFalseNAs_tTest, "CHK", "MAU2")
+
+chk_MAU2_l2fc_long <- pull_drugGene_l2fc_long(secondary_notrueNAs_keepFalseNAs_df, chk_MAU2_tResults, "MAU2", chk_drugs) # 1980
+
+chk_MAU2_boxplot <- drug_gene_boxplot(chk_MAU2_l2fc_long, "CHK", "MAU2")
+pdf("~/fusions/Figures/Figure_7/chk_MAU2_boxplot.pdf", width = 15, height = 8)
+chk_MAU2_boxplot
+dev.off()
+```
+
+# MOA = Topoisomerase: MAU2 in SKUT1 and MKN7
+GATAD2A::MAU2 in MKN7
+GATAD2A::MAU2 in SKUT1
+```{r}
+topo_drugs <- pull_drugs(final_secondary_treatmentInfo, "topoisomerase") #24 topoisomerase inhibiting drugs!
+
+topo_MAU2_tResults <- pull_drugGene_tResults(secondary_notrueNAs_keepFalseNAs_tTest, "topoisomerase", "MAU2")
+
+topo_MAU2_l2fc_long <- pull_drugGene_l2fc_long(secondary_notrueNAs_keepFalseNAs_df, topo_MAU2_tResults, "MAU2", topo_drugs) # 4356
+
+topo_MAU2_boxplot <- drug_gene_boxplot(topo_MAU2_l2fc_long, "Topoisomerase", "MAU2")
+pdf("~/fusions/Figures/Figure_7/topo_MAU2_boxplot.pdf", width = 15, height = 8)
+topo_MAU2_boxplot
+dev.off()
+```
