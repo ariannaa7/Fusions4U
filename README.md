@@ -1,5 +1,5 @@
-# Creating a resource of validated and annotated fusion genes in cancer cell lines
-We have used a newly developed fusion validation pipeline to create a large resource of validated and annotated gene fusions in publicly avaialble Cancer Cell Line Encylopedia (CCLE) cell lines.
+# Fusions4U: A resource of validated and annotated fusion genes in cancer cell lines
+We have used a newly developed fusion validation pipeline to create Fusions4U, a large resource of validated and annotated gene fusions in publicly avaialble Cancer Cell Line Encylopedia (CCLE) cell lines.
 
 See the fusion validation pipeline here: https://github.com/VolundurH/wgs_fusion_pipeline
 
@@ -17,6 +17,8 @@ See the fusion validation pipeline here: https://github.com/VolundurH/wgs_fusion
 | TumorFusions | Hu et al,.  2018 | https://pmc.ncbi.nlm.nih.gov/articles/pmid/29099951/ | 
 | Validated fusions in TCGA samples (predicted w/FusionCatcher) | Hafstað, Häkkinen, & Persson, 2023 | https://bmcgenomics.biomedcentral.com/articles/10.1186/s12864-023-09889-y | 
 | COSMIC Cancer Gene Census GRCh38 | COSMIC v102 (released Nov 19, 2024) | https://cancer.sanger.ac.uk/census 
+| PRISM drug repurposing resource  | Corsello et al., 2020 | https://depmap.org/repurposing/ 
+
 
 
 ### Conda Package Manager Anaconda3 (v2024.02-1)
@@ -195,4 +197,3 @@ The pre-generated CCLE alignment files are mapped to GRCh37/hg19 so *UCSC LiftOv
 | -------- | ------- |
 | Local  | Used **annotations_*.Rmd** scripts with a variety of datasets to annotate interesting validated fusions|
 | Local  | Used **exploratoryFigures.Rmd** to conduct a deeper dive into trends and patterns seen in fusions before and after validation|
-
