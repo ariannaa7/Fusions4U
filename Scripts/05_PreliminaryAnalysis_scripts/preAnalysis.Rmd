@@ -464,7 +464,7 @@ all_fusion_data_filtered <-
         threeprime_junctionSite_arriba == "intergenic"
     ) |
       program != "arriba"
-  ) %>% # Removes 9400 rows 36729 rows left (Arriba = 30606, STAR-Fusion = 6123)
+  ) %>% # Removes 8950 rows 36729 rows left (Arriba = 30606, STAR-Fusion = 6123)
 
   # If the program is Arriba and the 5' or 3' partner's strand that was transcribed could not be predicted, then remove! We need to know sense. The "." in gene strand were filtered out when we filtered out intergenic junctions for Arriba
   filter(fiveprime_transcribed_strand != "." &
