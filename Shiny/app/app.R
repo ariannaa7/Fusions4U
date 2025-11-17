@@ -303,8 +303,8 @@ doNotDisplayCols_butNeedInDetailView <-
     "hg38_fiveprime_gene_gtf_coordinates",
     "threeprime_gene_type",
     "hg38_threeprime_gene_gtf_coordinates",
-    "hg38_fiveprime_breakpoint_sanityPassingPair",
-    "hg38_threeprime_breakpoint_sanityPassingPair",
+    #"hg38_fiveprime_breakpoint_sanityPassingPair", # keeping these now, adding elipses in table view the case of multiple breakpoints
+    #"hg38_threeprime_breakpoint_sanityPassingPair",
     "fiveprime_transcriptionType",
     "threeprime_transcriptionType",
     "fusionType_arriba",
@@ -377,6 +377,7 @@ doNot_downloadCols <-
 
 # User Interface ####
 ui <- fluidPage(
+
   titlePanel(
     "Fusions4U: RNA-Seq predicted and WGS validated gene fusions (hg38)"
   ),
@@ -384,9 +385,15 @@ ui <- fluidPage(
     sidebarPanel(
       # On default, show all fusions. Allow user to pick 5' gene, 3' gene, or both. When they pick only one of the genes or none of the genes, the default will be "All"
       width = 3, # width of panel
-
-      # User can click this button to clear all side panel filtering and reset to original
-      actionButton("reset", "Reset to defaults", class = "btn btn-danger"), # btn-danger makes the button red
+      div(
+        style = "display: flex; justify-content: center; gap: 2px;", # put the buttons NEXT to each other instead of one below the other, center the buttons to width of sidebar, and put space between them
+        # trial and error with font size, style (above), and white-space/flex/width options. This displays well in smaller laptop screen and larger display
+        # User can click this button to clear all side panel filtering and reset to original
+        actionButton("reset", "Reset to defaults", class = "btn btn-danger", style = "font-size: 85%; white-space: nowrap; flex: 1;"), # btn-danger makes the button red
+        
+        # User can click this button to download fusions table (filtered/unfiltered depending on sidebar filtering user has utilized)
+        downloadButton("download_fusions_side", "Download fusions (TSV)", class = "btn btn-primary", style = "font-size: 85%; white-space: nowrap; flex: 1;") # btn-primary makes the button blue
+      ),
 
       # Display twins with one row or separate rows for Arriba & STAR-Fusion
       radioButtons(
@@ -546,7 +553,7 @@ ui <- fluidPage(
         tabPanel(
           "Table View",
           DTOutput("table"), # table that is searchable, and allows to click for next page
-          downloadButton("download_fusions", "Download TSV") # button that allows user to download the table
+          downloadButton("download_fusions_bottom", "Download fusions (TSV)", class = "btn btn-primary") # button BELOW TABLE that allows user to download the table
         ),
         tabPanel(
           "Detail View", # select a row in "Table View" and see the info more easily here
@@ -564,7 +571,7 @@ ui <- fluidPage(
           "Cell Line Supplementary", # see supplementary table that was created with rows for each cell line
           uiOutput("supp_blurb"),
           DTOutput("supp_table"), # table that is searchable, and allows to click for next page
-          downloadButton("download_supp", "Download TSV") # button that allows user to download the supplementary table
+          downloadButton("download_supp", "Download supplementary (TSV)", class = "btn btn-primary") # button that allows user to download the supplementary table
         ),
         tabPanel(
           "About", # check here for more information about each column in "Table View"
@@ -601,9 +608,9 @@ server <- function(input, output, session) {
       tagList(
         p("Welcome to Fusions4U!"),
         p("Here you will find gene fusions which were predicted using RNA-Seq and further validated with WGS data. Fusions were predicted using Arriba and STAR-Fusion."),
-        p("To sort the table, you may select the arrows beside the column name. To sort by more than one column hold the SHIFT key while making your selection."),
+        p("To sort the table, select the arrows beside the column name. To sort by more than one column, hold the SHIFT key while making your selection."),
         p("For a clearer and more informative view, select the row you are interested in and move to the 'Detail View' tab"),
-        p("To download the table (filtered or unfiltered), select 'Download TSV' at the bottom of your screen. The TSV file will contain many more columns than shown here allowing you to select columns for your interest/use")
+        p("To download the table (filtered or unfiltered), select 'Download fusions (TSV)' in the side panel or at the bottom of your screen. The TSV file will contain many more columns than shown here allowing you to select columns for your interest/use.")
       )
     } else {
       NULL # no blurb for other tabs (i.e. no blurb for Detail View)
@@ -945,37 +952,77 @@ server <- function(input, output, session) {
   # Display the fusions in table format ("Table View") based on filtering/reformatting parameters ####
   output$table <- renderDT({
     
+    # Display complete_filtered_df_toDisplay, manually omit geneID_fusionName, and update the "link" style columns to be named like the regular version
+    data <- complete_filtered_df_toDisplay() %>% select(-all_of(doNotDisplayCols_butNeedInDetailView)) %>% rename(
+      "fusion_name" = "fusion_name_link",
+      "sampleID" = "cell_line_link",
+      "hg38_fiveprime_breakpoint" = "hg38_fiveprime_breakpoint_sanityPassingPair", # rename for user-friendly purposes. column will maintain original naming in the downloaded version
+      "hg38_threeprime_breakpoint" = "hg38_threeprime_breakpoint_sanityPassingPair"
+    )
+    
+    # Create a function to truncate the breakpoint columns after the first comma (if there is one) and add an elpises! Keep function here instead of top of script
+    trunc_break_col <- function(breakpoint_col) {
+      sapply(breakpoint_col, function(x) {
+        if (grepl(",", x)) { # if the cell has a comma, e.g "chr12:53314072,chr12:53314077"
+          breakpoints <- strsplit(x, ",")[[1]] # then split the into a vector based on the commas, e.g. c("chr12:53314072","chr12:53314077")
+          paste0(
+            breakpoints[1], # display the first breakpoint
+            ' <span class="expand" style="color:blue; cursor:pointer;">…</span>', # add a clickable ellipsis
+            '<span class="full" style="display:none;">, ', paste(breakpoints[-1], collapse = ", "), '</span>' # hide the rest of the breakpoints
+          )
+        } else {
+          x # return original cell if there is no comma in it
+        }
+      }, USE.NAMES = FALSE)
+    }
+    
+    # Run the function to format the breakpoint cols
+    data$hg38_fiveprime_breakpoint <- trunc_break_col(data$hg38_fiveprime_breakpoint)
+    data$hg38_threeprime_breakpoint <- trunc_break_col(data$hg38_threeprime_breakpoint)
+    
     datatable(
-      # Display complete_filtered_df_toDisplay, manually omit geneID_fusionName, and update the "link" style columns to be named like the regular version
-      complete_filtered_df_toDisplay() %>% select(-all_of(doNotDisplayCols_butNeedInDetailView)) %>% rename(
-        "fusion_name" = "fusion_name_link",
-        "sampleID" = "cell_line_link"
-      ),
-      escape = FALSE, # NEW! escape = FALSE to show the hyperlink
-      selection = "single",
-      options = list(pageLength = 10, lengthMenu = c(10, 20, 50), scrollX = TRUE),
-      rownames = FALSE
-    ) # default will show 10 rows. User can pick to show 10, 20, or 50 rows. Allows one single row to be selected at a time
+      data,
+      escape = FALSE, # NEW! escape = FALSE to show the hyperlink and clickable elipses
+      selection = "single", # Allows one single row to be selected at a time
+      rownames = FALSE,
+      options = list(pageLength = 10, lengthMenu = c(10, 20, 50), scrollX = TRUE), # default will show 10 rows. User can pick to show 10, 20, or 50 rows. Horizontal scroll bar
+      # click on expandable element (ellipsis) if there is one, then hide ellipsis and show other (hidden) breakpoints
+      callback = JS("
+      table.on('click', 'span.expand', function() {
+        var $span = $(this);
+        $span.hide();
+        $span.siblings('span.full').show();
+      });
+    ")
+    ) 
   })
   
-  
+
   # Allow the user to download a tsv file with the fusions they filtered for (can download complete set if unfiltered) ####
-  output$download_fusions <- downloadHandler(
-    filename = function() {
-      paste("validatedFusions_", Sys.Date(), ".tsv", sep = "") # names file "validated fusions_year-month-date".tsv
-    },
-    content = function(file) {
-      write.table(
-        complete_filtered_df_to_download(),
-        file,
-        sep = "\t",
-        row.names = FALSE,
-        col.names = TRUE,
-        quote = FALSE
-      ) # will download the complete table based on what you have filtered (if no filtering, will download all entries). Not just entries displayed (10, 20, 50 per page), but all!!
-    }
-  )
+  # Make a function now so that download_fusions_side and download_fusions_bottom output the same table
+  make_fusion_download_handler <- function() {
+    downloadHandler(
+      filename = function() {
+        paste("validatedFusions_", Sys.Date(), ".tsv", sep = "") # names file "validated fusions_year-month-date".tsv
+      },
+      content = function(file) {
+        write.table(
+          complete_filtered_df_to_download(),
+          file,
+          sep = "\t",
+          row.names = FALSE,
+          col.names = TRUE,
+          quote = FALSE
+        ) # will download the complete table based on what you have filtered (if no filtering, will download all entries). Not just entries displayed (10, 20, 50 per page), but all!!
+      }
+    )
+  }
   
+  # Run the same function for download_fusions_side download_fusions_bottom
+  output$download_fusions_side <- make_fusion_download_handler()
+  output$download_fusions_bottom <- make_fusion_download_handler()
+  
+
   # Pull a selected row from "Table View" in prep for "Detail view" ####
   selected_row <- reactive({
     req(input$table_rows_selected) # ensure a row is selected
@@ -1444,7 +1491,7 @@ server <- function(input, output, session) {
       tagList(
         p(""),
         p("Here you will find more information about each CCLE cell line and its validated gene fusions."),
-        p("To download the table, select 'Download TSV' at the bottom of your screen.")
+        p("To download the table, select 'Download supplementary (TSV)' at the bottom of your screen.")
       )
     } else {
       NULL # don't show this blurb for other tabs (i.e. no blurb for Detail View)
